@@ -1,2 +1,3 @@
-# randomcommittees
-A library for random committee selection for scaling out consensus protocols
+# A library to facilitate random committee selection among consensus nodes
+
+
