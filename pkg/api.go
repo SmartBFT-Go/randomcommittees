@@ -52,9 +52,11 @@ type Output struct {
 
 // CommitteeSelection is an interface that describes the API of the committee selection library
 type CommitteeSelection interface {
-	// VerifyCommitment should be called whenever the node receives a commitment and before passing it to the library or persisting it
+	// VerifyCommitment should be called whenever the node receives a commitment
+	// and before passing it to the library or persisting it
 	VerifyCommitment(Commitment) error
-	// VerifyReconShare should be called whenever the node receives a ReconShare and before passing it to the library or persisting it
+	// VerifyReconShare should be called whenever the node receives a ReconShare
+	// and before passing it to the library or persisting it
 	VerifyReconShare(ReconShare) error
 	// Step interacts with the committee selection and feeds it with events of other remote instances from Input,
 	// and receives feedback on a committee change or requests of messages to be sent via Output.
