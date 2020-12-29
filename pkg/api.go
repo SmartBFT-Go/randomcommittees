@@ -22,6 +22,7 @@ type ReconShare struct {
 
 // Config is the configuration of a committee
 type Config struct {
+	ID              uint32   // ID is our own identifier
 	Committee       []uint32 // The current committee
 	Nodes           []uint32 // All nodes
 	MinimumLifespan uint32   // How many consensus rounds at minimum the committee remains
