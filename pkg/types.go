@@ -25,11 +25,28 @@ type ReconShare struct {
 
 // Config is the configuration of a committee
 type Config struct {
-	Nodes           []uint32 // All nodes
-	MinimumLifespan uint32   // How many consensus rounds at minimum the committee remains
+	// Nodes denotes the identifiers of all nodes
+	// the committee can be selected from
+	Nodes []uint32
+	// How many consensus rounds at minimum the committee remains
+	MinimumLifespan uint32
+	// InverseFailureChance is 1/p where p is the probability
+	// to select more than a third
+	// of failed nodes to the committee.
+	// The higher this number is, the larger the committee.
+	// The lower this number is, the bigger chance to select
+	// a committee with too many failed nodes.
+	InverseFailureChance uint64
+	// ExcludedNodes are nodes the current committee decided
+	// not to be included in this committee
+	ExcludedNodes []uint32
+	// MandatoryNodes are nodes that current committee decided
+	// that must be in this committee
+	MandatoryNodes []uint32
 }
 
-// State denotes the data structures that we should persist and input to the committee selection at each round.
+// State denotes the data structures that we should persist
+// and input to the committee selection at each round.
 type State interface {
 	Initialize([]byte) error
 	ToBytes() []byte
@@ -37,11 +54,14 @@ type State interface {
 
 // Input is what the committee selection library consumes each round
 type Input struct {
-	State         State        // State is the state the committee acts on
-	Commitments   []Commitment // Commitments denotes commitments arriving from nodes
-	ReconShares   []ReconShare // ReconShares denote the ReconShares received from all nodes if applicable
-	NextConfig    Config       // NextConfig is the configuration of the next committee selection if applicable
-	ExcludedNodes []uint32     // Nodes the current committee decided not to be included in the next committee
+	// State is the state the committee acts on
+	State State
+	// Commitments denotes commitments arriving from nodes
+	Commitments []Commitment
+	// ReconShares denote the ReconShares received from all nodes if applicable
+	ReconShares []ReconShare
+	// NextConfig is the configuration of the next committee selection if applicable
+	NextConfig Config
 }
 
 // Outputs denotes the action the committee selection library wants us to perform,

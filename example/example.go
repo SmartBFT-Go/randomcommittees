@@ -107,7 +107,9 @@ func TestAPIUsage(t *testing.T) {
 				// Ignore this ReconShare as it is maliciously crafted
 				continue
 			}
-			receivedReconShares = append(receivedReconShares, unverifiedReconshare)
+			receivedReconShares = append(
+				receivedReconShares,
+				unverifiedReconshare)
 		}
 	} // for
 
