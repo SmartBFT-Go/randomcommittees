@@ -22,8 +22,8 @@ func (m *CommitteeSelectionMock) Initialize(ID uint32, PrivateKey []byte) error 
 	return nil
 }
 
-func (m *CommitteeSelectionMock) Process(input pvss.Input) pvss.Output {
-	return pvss.Output{}
+func (m *CommitteeSelectionMock) Process(_ pvss.State, _ pvss.Input) (pvss.Feedback, pvss.State) {
+	return pvss.Feedback{}, nil
 }
 
 func (m *CommitteeSelectionMock) VerifyCommitment(commitment pvss.Commitment, key pvss.PublicKey) error {

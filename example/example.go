@@ -21,7 +21,7 @@ func (c comm) Send(_ interface{}) {
 }
 
 func (c comm) Receive() (pvss.Commitment, []pvss.ReconShare) {
-	return nil, nil
+	return pvss.Commitment{}, nil
 }
 
 func toBytes(_ interface{}) []byte {
@@ -68,13 +68,12 @@ func TestAPIUsage(t *testing.T) {
 	var comm comm
 
 	for {
-		output := cs.Process(pvss.Input{
-			State:       state,
+		output, newState := cs.Process(state, pvss.Input{
 			Commitments: receivedCommitments,
 			ReconShares: receivedReconShares,
 		})
 
-		state = output.NextState
+		state = newState
 
 		if output.Commitment != nil {
 			comm.Send(output.Commitment)
