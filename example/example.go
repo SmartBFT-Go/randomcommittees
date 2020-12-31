@@ -13,8 +13,22 @@ import (
 	pvss "github.com/SmartBFT-Go/randomcommittees/pkg"
 )
 
+type comm struct {
+}
+
+func (c comm) Send(_ interface{}) {
+
+}
+
+func (c comm) Receive() (pvss.Commitment, []pvss.ReconShare) {
+	return nil, nil
+}
+
+func toBytes(_ interface{}) []byte {
+	return nil
+}
+
 var (
-	commitment   = pvss.Commitment{}
 	reconsShare1 = pvss.ReconShare{}
 	reconsShare2 = pvss.ReconShare{}
 	publicKey1   []byte
@@ -51,6 +65,8 @@ func TestAPIUsage(t *testing.T) {
 	var receivedCommitments []pvss.Commitment
 	var receivedReconShares []pvss.ReconShare
 
+	var comm comm
+
 	for {
 		output := cs.Process(pvss.Input{
 			State:       state,
@@ -61,11 +77,10 @@ func TestAPIUsage(t *testing.T) {
 		state = output.NextState
 
 		if output.Commitment != nil {
-			// Send commitment to everyone
+			comm.Send(output.Commitment)
 		}
 		for _, rcs := range output.ReconShares {
-			// Send reconsShare to everyone
-			_ = rcs
+			comm.Send(rcs)
 		}
 
 		for _, id := range output.NextCommittee {
@@ -76,19 +91,24 @@ func TestAPIUsage(t *testing.T) {
 			}
 		}
 
-		// Receive commitments and ReconShares
-		// ...
-		if err := cs.VerifyCommitment(commitment, publicKey1); err != nil {
+		receivedCommitments = nil
+		receivedReconShares = nil
+		// Receive commitments from other nodes
+		unverifiedCommitment, unverifiedReconshares := comm.Receive()
+		err := cs.VerifyCommitment(unverifiedCommitment, publicKey1)
+		if err != nil {
 			// Ignore this commitment as it is maliciously crafted
+		} else {
+			receivedCommitments = []pvss.Commitment{unverifiedCommitment}
 		}
-		if err := cs.VerifyReconShare(reconsShare1, publicKey1); err != nil {
-			// Ignore this ReconShare as it is maliciously crafted
+		for _, unverifiedReconshare := range unverifiedReconshares {
+			err = cs.VerifyReconShare(reconsShare1, publicKey1)
+			if err != nil {
+				// Ignore this ReconShare as it is maliciously crafted
+				continue
+			}
+			receivedReconShares = append(receivedReconShares, unverifiedReconshare)
 		}
-		if err := cs.VerifyReconShare(reconsShare2, publicKey2); err != nil {
-			// Ignore this ReconShare as it is maliciously crafted
-		}
-		receivedCommitments = []pvss.Commitment{commitment}
-		receivedReconShares = []pvss.ReconShare{reconsShare1, reconsShare2}
-	}
+	} // for
 
 }
