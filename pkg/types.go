@@ -25,8 +25,24 @@ type ReconShare struct {
 
 // Config is the configuration of a committee
 type Config struct {
-	Nodes           []uint32 // All nodes
-	MinimumLifespan uint32   // How many consensus rounds at minimum the committee remains
+	// Nodes denotes the identifiers of all nodes
+	// the committee can be selected from
+	Nodes []uint32
+	// How many consensus rounds at minimum the committee remains
+	MinimumLifespan uint32
+	// InverseFailureChance is 1/p where p is the probability
+	// to select more than a third
+	// of failed nodes to the committee.
+	// The higher this number is, the larger the committee.
+	// The lower this number is, the bigger chance to select
+	// a committee with too many failed nodes.
+	InverseFailureChance uint64
+	// ExcludedNodes are nodes the current committee decided
+	// not to be included in this committee
+	ExcludedNodes []uint32
+	// MandatoryNodes are nodes that current committee decided
+	// that must be in this committee
+	MandatoryNodes []uint32
 }
 
 // State denotes the data structures that we should persist
@@ -46,18 +62,6 @@ type Input struct {
 	ReconShares []ReconShare
 	// NextConfig is the configuration of the next committee selection if applicable
 	NextConfig Config
-	// ExcludedNodes are nodes the current committee decided
-	// not to be included in the next committee
-	ExcludedNodes []uint32
-	// MandatoryNodes are nodes that current committee decided
-	// that must be be in the next committee
-	MandatoryNodes []uint32
-	// InverseFailureChance is 1/p where p is the probability to select more than a third
-	// of failed nodes to the committee.
-	// The higher this number is, the larger the committee.
-	// The lower this number is, the bigger chance to select a committee with too many
-	// failed nodes.
-	InverseFailureChance uint64
 }
 
 // Outputs denotes the action the committee selection library wants us to perform,
