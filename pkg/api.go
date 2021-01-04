@@ -14,8 +14,9 @@ type CommitteeSelection interface {
 	// Initialize initializes the committee selection instance with the given identifier and private key
 	Initialize(ID uint32, PrivateKey []byte) error
 	// Process interacts with the committee selection and feeds it with events of other remote instances from Input,
-	// and receives feedback on a committee change or requests of messages to be sent via Output.
-	Process(Input) Output
+	// and receives feedback on a committee change or requests of messages to be sent via Feedback.
+	// The operation operates on the given state and the new state is returned.
+	Process(State, Input) (Feedback, State)
 	// VerifyCommitment should be called whenever the node receives a commitment
 	// and before passing it to the library or persisting it
 	VerifyCommitment(Commitment, PublicKey) error

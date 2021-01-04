@@ -54,8 +54,6 @@ type State interface {
 
 // Input is what the committee selection library consumes each round
 type Input struct {
-	// State is the state the committee acts on
-	State State
 	// Commitments denotes commitments arriving from nodes
 	Commitments []Commitment
 	// ReconShares denote the ReconShares received from all nodes if applicable
@@ -64,11 +62,10 @@ type Input struct {
 	NextConfig Config
 }
 
-// Outputs denotes the action the committee selection library wants us to perform,
+// Feedback denotes the action the committee selection library wants us to perform,
 // namely to send a Commitment or ReconShares or to notify that a new committee has been selected
-type Output struct {
+type Feedback struct {
 	Commitment    *Commitment  // Commitment to broadcast, if applicable
 	ReconShares   []ReconShare // ReconShares to broadcast, if applicable
 	NextCommittee []uint32     // The next committee, if applicable. It may be equal to the current committee
-	NextState     State        // The next state the committee will act on
 }
