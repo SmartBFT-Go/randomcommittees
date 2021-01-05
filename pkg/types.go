@@ -43,6 +43,15 @@ type Config struct {
 	// MandatoryNodes are nodes that current committee decided
 	// that must be in this committee
 	MandatoryNodes []uint32
+	// Weights denote relative multipliers for each node's chance
+	// to be selected into a committee.
+	Weights []Weight
+}
+
+// Weight is a mapping between a node's identifier
+// and a relative multiplier.
+type Weight struct {
+	ID, Weight uint32
 }
 
 // State denotes the data structures that we should persist
