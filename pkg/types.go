@@ -30,6 +30,10 @@ type Config struct {
 	Nodes []uint32
 	// How many consensus rounds at minimum the committee remains
 	MinimumLifespan uint32
+	// FailedTotalNodesPercentage is the assumed upper bound
+	// on the percentage of nodes that can fail out of all nodes
+	// in the network.
+	FailedTotalNodesPercentage uint64
 	// InverseFailureChance is 1/p where p is the probability
 	// to select more than a third
 	// of failed nodes to the committee.
