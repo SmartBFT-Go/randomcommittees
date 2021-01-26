@@ -24,3 +24,30 @@ type CommitteeSelection interface {
 	// and before passing it to the library or persisting it
 	VerifyReconShare(ReconShare, PublicKey) error
 }
+
+type committeeSelection struct {
+}
+
+func (c *committeeSelection) GenerateKeyPair(rand io.Reader) (PublicKey, PrivateKey, error, error) {
+	panic("implement me")
+}
+
+func (c *committeeSelection) Initialize(ID uint32, PrivateKey []byte) error {
+	panic("implement me")
+}
+
+func (c *committeeSelection) Process(state State, input Input) (Feedback, State) {
+	panic("implement me")
+}
+
+func (c *committeeSelection) VerifyCommitment(commitment Commitment, key PublicKey) error {
+	panic("implement me")
+}
+
+func (c *committeeSelection) VerifyReconShare(share ReconShare, key PublicKey) error {
+	panic("implement me")
+}
+
+func New() *committeeSelection {
+	return &committeeSelection{}
+}
