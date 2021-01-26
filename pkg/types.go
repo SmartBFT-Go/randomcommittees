@@ -5,6 +5,8 @@
 
 package pvss
 
+import "encoding/asn1"
+
 type PublicKey []byte
 
 type PrivateKey []byte
@@ -27,35 +29,48 @@ type ReconShare struct {
 type Config struct {
 	// Nodes denotes the identifiers of all nodes
 	// the committee can be selected from
-	Nodes []uint32
+	Nodes []int32
 	// How many consensus rounds at minimum the committee remains
-	MinimumLifespan uint32
+	MinimumLifespan int32
 	// FailedTotalNodesPercentage is the assumed upper bound
 	// on the percentage of nodes that can fail out of all nodes
 	// in the network.
-	FailedTotalNodesPercentage uint64
+	FailedTotalNodesPercentage int64
 	// InverseFailureChance is 1/p where p is the probability
 	// to select more than a third
 	// of failed nodes to the committee.
 	// The higher this number is, the larger the committee.
 	// The lower this number is, the bigger chance to select
 	// a committee with too many failed nodes.
-	InverseFailureChance uint64
+	InverseFailureChance int64
 	// ExcludedNodes are nodes the current committee decided
 	// not to be included in this committee
-	ExcludedNodes []uint32
+	ExcludedNodes []int32
 	// MandatoryNodes are nodes that current committee decided
 	// that must be in this committee
-	MandatoryNodes []uint32
+	MandatoryNodes []int32
 	// Weights denote relative multipliers for each node's chance
 	// to be selected into a committee.
 	Weights []Weight
 }
 
+func (config *Config) Unmarshal(bytes []byte) error {
+	_, err := asn1.Unmarshal(bytes, config)
+	return err
+}
+
+func (config *Config) Marshal() []byte {
+	bytes, err := asn1.Marshal(*config)
+	if err != nil {
+		panic(err)
+	}
+	return bytes
+}
+
 // Weight is a mapping between a node's identifier
 // and a relative multiplier.
 type Weight struct {
-	ID, Weight uint32
+	ID, Weight int32
 }
 
 // State denotes the data structures that we should persist
