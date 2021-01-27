@@ -10,7 +10,7 @@ import "io"
 // CommitteeSelection is an interface that describes the API of the committee selection library
 type CommitteeSelection interface {
 	// GeneratePrivateKey generates a private key for an instance using the given randomness
-	GenerateKeyPair(rand io.Reader) (PublicKey, PrivateKey, error, error)
+	GenerateKeyPair(rand io.Reader) (PublicKey, PrivateKey, error)
 	// Initialize initializes the committee selection instance with the given identifier and private key
 	Initialize(ID uint32, PrivateKey []byte) error
 	// Process interacts with the committee selection and feeds it with events of other remote instances from Input,
@@ -28,26 +28,38 @@ type CommitteeSelection interface {
 type committeeSelection struct {
 }
 
-func (c *committeeSelection) GenerateKeyPair(rand io.Reader) (PublicKey, PrivateKey, error, error) {
-	panic("implement me")
+func (c *committeeSelection) GenerateKeyPair(rand io.Reader) (PublicKey, PrivateKey, error) {
+	// TODO: implement this for real
+	return nil, nil, nil
 }
 
 func (c *committeeSelection) Initialize(ID uint32, PrivateKey []byte) error {
-	panic("implement me")
+	return nil
 }
 
 func (c *committeeSelection) Process(state State, input Input) (Feedback, State) {
-	panic("implement me")
+	return Feedback{}, &basicState{}
 }
 
 func (c *committeeSelection) VerifyCommitment(commitment Commitment, key PublicKey) error {
-	panic("implement me")
+	return nil
 }
 
 func (c *committeeSelection) VerifyReconShare(share ReconShare, key PublicKey) error {
-	panic("implement me")
+	return nil
 }
 
 func New() *committeeSelection {
 	return &committeeSelection{}
+}
+
+type basicState struct {
+}
+
+func (b *basicState) Initialize(bytes []byte) error {
+	panic("implement me")
+}
+
+func (b *basicState) ToBytes() []byte {
+	panic("implement me")
 }
