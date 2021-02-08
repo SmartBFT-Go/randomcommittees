@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-package pvss
+package committee
 
 import "encoding/asn1"
 
@@ -27,9 +27,8 @@ type ReconShare struct {
 
 // Config is the configuration of a committee
 type Config struct {
-	// Nodes denotes the identifiers of all nodes
-	// the committee can be selected from
-	Nodes []int32
+	// Nodes denotes all nodes the committee can be selected from
+	Nodes Nodes
 	// How many consensus rounds at minimum the committee remains
 	MinimumLifespan int32
 	// FailedTotalNodesPercentage is the assumed upper bound
@@ -71,6 +70,34 @@ func (config *Config) Marshal() []byte {
 // and a relative multiplier.
 type Weight struct {
 	ID, Weight int32
+}
+
+// Node denotes a node in our protocol,
+// which is identified by an identifier and a public key
+type Node struct {
+	ID     int32
+	PubKey []byte
+}
+
+// Nodes is an aggregation of multiple nodes
+type Nodes []Node
+
+// IDs returns the identifiers of all nodes
+func (nodes Nodes) IDs() []int32 {
+	var ids []int32
+	for _, node := range nodes {
+		ids = append(ids, node.ID)
+	}
+	return ids
+}
+
+// PubKeys returns the public keys of the Nodes in the same order they appear
+func (nodes Nodes) PubKeys() [][]byte {
+	var res [][]byte
+	for _, n := range nodes {
+		res = append(res, n.PubKey)
+	}
+	return res
 }
 
 // State denotes the data structures that we should persist
