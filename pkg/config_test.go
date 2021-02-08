@@ -1,4 +1,9 @@
-package pvss
+// Copyright IBM Corp. All Rights Reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package committee
 
 import (
 	"testing"
@@ -13,11 +18,12 @@ func TestConfigMarshalUnmarshal(t *testing.T) {
 		ExcludedNodes:              []int32{4, 5, 6},
 		InverseFailureChance:       2,
 		MinimumLifespan:            3,
-		Nodes:                      []int32{7, 8, 9},
+		Nodes:                      Nodes{{ID: 7, PubKey: []byte{1, 2, 3}}},
 		Weights:                    []Weight{{ID: 1, Weight: 25}, {ID: 2, Weight: 25}, {ID: 3, Weight: 50}},
 	}
 
 	cm2 := &Config{}
-	cm2.Unmarshal(cm.Marshal())
+	err := cm2.Unmarshal(cm.Marshal())
+	assert.NoError(t, err)
 	assert.Equal(t, cm, cm2)
 }
