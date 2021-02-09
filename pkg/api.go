@@ -34,7 +34,7 @@ func (c *committeeSelection) GenerateKeyPair(rand io.Reader) (PublicKey, Private
 	return nil, nil, nil
 }
 
-func (c *committeeSelection) Initialize(_ uint32, _ []byte, _ [][]byte) error {
+func (c *committeeSelection) Initialize(_ uint32, _ []byte, nodes Nodes) error {
 	return nil
 }
 
