@@ -2,16 +2,19 @@ package cs
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/asn1"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
-
-	"go.dedis.ch/kyber/v3/proof/dleq"
-	"go.dedis.ch/kyber/v3/share"
+	"reflect"
 
 	committee "github.com/SmartBFT-Go/randomcommittees/pkg"
 	"go.dedis.ch/kyber/v3"
+	"go.dedis.ch/kyber/v3/proof/dleq"
+	"go.dedis.ch/kyber/v3/share"
 	"go.dedis.ch/kyber/v3/share/pvss"
 	"go.dedis.ch/kyber/v3/suites"
 )
@@ -25,12 +28,14 @@ var (
 type CommitteeSelection struct {
 	// Configuration
 	id      uint32
+	ourIndex int
 	sk      kyber.Scalar
 	pk      kyber.Point
 	pubKeys []kyber.Point
 	// State
 	commitment          *Commitment
 	commitmentInRawForm *committee.Commitment
+	state *State
 }
 
 func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) ([]byte, []byte, error) {
@@ -62,10 +67,12 @@ func (cs *CommitteeSelection) Initialize(ID uint32, privateKey []byte, nodes com
 		return fmt.Errorf("failed marshaling our public key: %v", err)
 	}
 
-	// Are we in the nodes at all?
-	if err := IsNodeInConfig(cs.id, pkRaw, nodes); err != nil {
+	// Locate our index within the nodes according to the ID and public keys
+	cs.ourIndex, err = IsNodeInConfig(cs.id, pkRaw, nodes)
+	if err != nil {
 		return err
 	}
+
 
 	// Initialize public keys in EC point form
 	for _, pubKey := range nodes.PubKeys() {
@@ -80,19 +87,19 @@ func (cs *CommitteeSelection) Initialize(ID uint32, privateKey []byte, nodes com
 }
 
 // IsNodeInConfig returns whether the given node is in the config.
-func IsNodeInConfig(id uint32, expectedPubKey []byte, nodes committee.Nodes) error {
-	for _, node := range nodes {
+func IsNodeInConfig(id uint32, expectedPubKey []byte, nodes committee.Nodes) (int, error) {
+	for i, node := range nodes {
 		if node.ID != int32(id) {
 			continue
 		}
 		if bytes.Equal(node.PubKey, expectedPubKey) {
-			return nil
+			return i, nil
 		}
-		return fmt.Errorf("expected public key %s but found %s",
+		return 0, fmt.Errorf("expected public key %s but found %s",
 			base64.StdEncoding.EncodeToString(expectedPubKey),
 			base64.StdEncoding.EncodeToString(node.PubKey))
 	}
-	return fmt.Errorf("could not find ID %d among %v", id, nodes)
+	return 0, fmt.Errorf("could not find ID %d among %v", id, nodes)
 }
 
 func VerifyConfig(config committee.Config) error {
@@ -107,9 +114,20 @@ func VerifyConfig(config committee.Config) error {
 
 func (cs *CommitteeSelection) Process(state committee.State, input committee.Input) (committee.Feedback, committee.State, error) {
 	feedback := committee.Feedback{}
+
+	newState, isState := state.(*State)
+	if ! isState {
+		return feedback, nil, fmt.Errorf("expected to receive a committee.State state but got %v", reflect.TypeOf(state))
+	}
+
+	// This state is different than the one we have, so assign the updated state.
+	if cs.state == nil || newState.header.BodyDigest != cs.state.header.BodyDigest {
+		cs.state = newState
+	}
+
 	// Search for a commitment among the current state.
 	// If we found a commitment in the current state, then load it to avoid computing it.
-	commitments := state.(*State).Commitments
+	commitments := cs.state.commitments
 	if err := cs.loadOurCommitment(commitments); err != nil {
 		return committee.Feedback{}, nil, err
 	}
@@ -124,6 +142,55 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 	// Assign the commitment to be sent
 	feedback.Commitment = cs.commitmentInRawForm
 
+	var changed bool
+
+	// If we have any commitments sent, refine them
+	newCommitments, err := refineCommitments(input.Commitments)
+	if err != nil {
+		return feedback, nil, fmt.Errorf("failed extracting raw commitments from input: %v", err)
+	}
+
+	for i := 0; i < len(newCommitments) && len(cs.state.commitments) < cs.threshold(); i++ {
+		changed = true
+		cs.state.commitments = append(cs.state.commitments, newCommitments[i])
+		cs.state.body.Commitments = append(cs.state.body.Commitments, input.Commitments[i])
+	}
+
+
+	// We check if the state has changed during this invocation
+	if changed {
+		cs.state.bodyBytes = cs.state.body.Bytes()
+		cs.state.header.BodyDigest = digest(cs.state.bodyBytes)
+	}
+
+	// Always increment the header stats
+	if cs.state.header.RemainingRounds > 0 {
+		cs.state.header.RemainingRounds--
+	}
+
+	// Did we receive reconstruction shares?
+	receivedReconShares := len(input.ReconShares) > 0
+
+	// Is this the last round for this committee and we should send reconstruction shares?
+	if len(cs.state.commitments) == cs.threshold() && cs.state.header.RemainingRounds == 0 && !receivedReconShares {
+		reconShares, err := cs.createReconShares()
+		if err != nil {
+			return feedback, nil, fmt.Errorf("failed creating reconstruction shares: %v", err)
+		}
+		feedback.ReconShares = reconShares
+	}
+
+	if receivedReconShares {
+		secret, err := cs.secretFromReconShares(input.ReconShares)
+		if err != nil {
+			return feedback, state, err
+		}
+
+		// TODO: pick the committee from the secret and assign it
+		_ = secret
+	}
+
+
 	return feedback, state, nil
 
 }
@@ -134,6 +201,114 @@ func (cs *CommitteeSelection) VerifyCommitment(commitment committee.Commitment, 
 
 func (cs *CommitteeSelection) VerifyReconShare(share committee.ReconShare, key committee.PublicKey) error {
 	panic("implement me")
+}
+
+func (cs *CommitteeSelection) secretFromReconShares(reconShares []committee.ReconShare) ([]byte, error) {
+	var shares []*share.PubShare
+	for _, reconShare := range reconShares {
+		decShare, err := encShareToPubVerShare(reconShare.Data)
+		if err != nil {
+			return nil, fmt.Errorf("failed processing decryption share of %d: %v", reconShare.About, err)
+		}
+		shares = append(shares, &decShare.S)
+	}
+
+	t := cs.threshold()
+	n := len(cs.pubKeys)
+
+	secret, err := share.RecoverCommit(suite, shares, t, n)
+	if err != nil {
+		return nil, fmt.Errorf("failed reconstructing secret: %v", err)
+	}
+
+	secretAsBytes, err := secret.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed marshaling secret to bytes: %v", err)
+	}
+
+	return secretAsBytes, nil
+}
+
+func recoverSecret(decShares []*pvss.PubVerShare, t int, n int) (kyber.Point, error) {
+	var shares []*share.PubShare
+	for _, s := range decShares {
+		shares = append(shares, &s.S)
+	}
+	return share.RecoverCommit(suite, shares, t, n)
+}
+
+
+
+func (cs *CommitteeSelection) createReconShares() ([]committee.ReconShare, error) {
+	var res []committee.ReconShare
+	for _, cmt := range cs.state.commitments {
+		ourShare := cmt.EncShares[cs.ourIndex]
+		decryptedShare, err := decShare(cs.sk, ourShare)
+		if err != nil {
+			return nil, fmt.Errorf("failed decrypting our own share(%v): %v", ourShare, err)
+		}
+
+		reconShare, err := decShareToReconShare(uint32(cmt.From), decryptedShare)
+		if err != nil {
+			return nil, err
+		}
+
+		res = append(res, *reconShare)
+	}
+
+	return res, nil
+}
+
+func decShareToReconShare(from uint32, decryptedShare *pvss.PubVerShare) (*committee.ReconShare, error) {
+	decShareBytes, err := decryptedShare.S.V.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed decrypting shares")
+	}
+
+	p := decryptedShare.P
+	proof := Proof{
+		Proofs: []dleq.Proof{
+			{
+				R: p.R,
+				VG: p.VG,
+				VH: p.VH,
+			},
+		},
+	}
+
+	proofBytes, err := proof.ToBytes()
+	if err != nil {
+		return nil, fmt.Errorf("failed marshaling proof: %v", err)
+	}
+
+	// We use here the EncShare struct even though it is a decryption,
+	// because their fields are equivalent.
+	decShare := EncShare{
+		I: decryptedShare.S.I,
+		V: decShareBytes,
+	}
+
+	rawDecShare, err := asn1.Marshal(decShare)
+	if err != nil {
+		return nil, fmt.Errorf("failed marshaling decryption share")
+	}
+
+	return &committee.ReconShare{
+		Data: rawDecShare,
+		Proof: proofBytes,
+		About: from,
+	}, nil
+}
+
+func decShare(x kyber.Scalar, encShare *pvss.PubVerShare) (*pvss.PubVerShare, error) {
+	G := suite.Point().Base()
+	decryptedV := suite.Point().Mul(suite.Scalar().Inv(x), encShare.S.V)
+	share := &share.PubShare{I: encShare.S.I, V: decryptedV}
+	P, _, _, err := dleq.NewDLEQProof(suite, G, decryptedV, x)
+	if err != nil {
+		return nil, fmt.Errorf("failed creating DLEQ proof: %v", err)
+	}
+	return &pvss.PubVerShare{S: *share,P: *P}, nil
 }
 
 func (cs *CommitteeSelection) loadOurCommitment(commitments []Commitment) error {
@@ -178,15 +353,20 @@ func (cs *CommitteeSelection) prepareCommitment() error {
 	return nil
 }
 
-func (cs *CommitteeSelection) commit() (shares []*pvss.PubVerShare, commitments []kyber.Point, err error) {
+func (cs *CommitteeSelection) threshold() int {
 	pubKeys := cs.pubKeys
 	n := len(pubKeys)
 	f := (n - 1) / 3
 	t := f + 1
+	return t
+}
+
+func (cs *CommitteeSelection) commit() (shares []*pvss.PubVerShare, commitments []kyber.Point, err error) {
+	pubKeys := cs.pubKeys
 
 	secret := suite.Scalar().Pick(suite.RandomStream())
 
-	shares, commit, err := pvss.EncShares(suite, h, pubKeys, secret, t)
+	shares, commit, err := pvss.EncShares(suite, h, pubKeys, secret, cs.threshold())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed computing encryption shares: %v", err)
 	}
@@ -197,25 +377,107 @@ func (cs *CommitteeSelection) commit() (shares []*pvss.PubVerShare, commitments 
 }
 
 type State struct {
-	Commitments []Commitment
+	commitments []Commitment
+	header Header
+	body   Body
+	bodyBytes []byte
 }
 
-func (s *State) Initialize(bytes []byte) error {
-	rs := &RawState{}
-	if _, err := asn1.Unmarshal(bytes, rs); err != nil {
-		return fmt.Errorf("failed unmarshaling state bytes(%s): %v", base64.StdEncoding.EncodeToString(bytes), err)
+func (s *State) Initialize(rawState []byte) error {
+	bb := bytes.NewBuffer(rawState)
+	// Read header size
+	headerSizeBuff := make([]byte, 4)
+	if _, err := bb.Read(headerSizeBuff); err != nil {
+		stateAsString := base64.StdEncoding.EncodeToString(rawState)
+		return fmt.Errorf("failed reading header size from raw state (%s): %v", stateAsString, err)
+	}
+	headerSize := int(binary.BigEndian.Uint32(headerSizeBuff))
+	headerBuff := make([]byte, headerSize)
+	if _, err := bb.Read(headerBuff); err != nil {
+		stateAsString := base64.StdEncoding.EncodeToString(rawState)
+		return fmt.Errorf("failed reading header from raw state (%s): %v", stateAsString, err)
 	}
 
-	if err := s.loadCommitments(rs.Commitments); err != nil {
+	// Read header
+	header := &Header{}
+	if _, err := asn1.Unmarshal(headerBuff, header); err != nil {
+		stateAsString := base64.StdEncoding.EncodeToString(rawState)
+		return fmt.Errorf("failed reading header from raw state (%s): %v", stateAsString, err)
+	}
+
+	s.header = *header
+
+	// If the digest of our previous state is equal to the digest of the next state,
+	// then no need to process the body as the result would not change.
+	if header.BodyDigest == s.header.BodyDigest {
+		return nil
+	}
+
+	// The rest of the bytes are for the body
+	remainingLength := len(rawState) - (headerSize + 4)
+	bodyBuff := rawState[remainingLength:]
+
+	body := &Body{}
+	if _, err := asn1.Unmarshal(bodyBuff, body); err != nil {
+		stateAsString := base64.StdEncoding.EncodeToString(rawState)
+		return fmt.Errorf("failed unmarshaling state bytes(%s): %v", stateAsString, err)
+	}
+
+	if err := s.loadCommitments(body.Commitments); err != nil {
 		return fmt.Errorf("failed unmarshaling commitments: %v", err)
 	}
+
+	s.bodyBytes = bodyBuff
+	s.body = *body
 
 	return nil
 
 }
 
+func (s *State) ToBytes() []byte {
+	bb := bytes.Buffer{}
+	headerBytes := s.header.Bytes()
+	headerLength := len(headerBytes)
+	headerLengthBuff := make([]byte, 4)
+	binary.BigEndian.PutUint32(headerLengthBuff, uint32(headerLength))
+	bb.Write(headerLengthBuff)
+	bb.Write(headerBytes)
+	bb.Write(s.bodyBytes)
+	return bb.Bytes()
+}
+
 func (s *State) loadCommitments(rawCommitments []committee.Commitment) error {
-	s.Commitments = nil
+	var err error
+
+	s.body.Commitments = rawCommitments
+	s.commitments = nil
+	s.commitments, err = refineCommitments(rawCommitments)
+
+	return err
+}
+
+func encShareToPubVerShare(rawEncShare []byte) (*pvss.PubVerShare, error){
+	encShare := &EncShare{}
+	if _, err := asn1.Unmarshal(rawEncShare, encShare); err != nil {
+		return nil, fmt.Errorf("failed unmarshaling raw encryption share")
+	}
+	p := suite.Point() // Create an empty curve point
+	// Assign it to an encryption share
+	if err := p.UnmarshalBinary(encShare.V); err != nil {
+		return nil, fmt.Errorf("failed unmarshaling encryption share (%s): %v", base64.StdEncoding.EncodeToString(encShare.V), err)
+	}
+
+	return &pvss.PubVerShare{
+		P: dleq.Proof{}, // We don't need to verify the proof, as it is checked during consensus.
+		S: share.PubShare{
+			I: encShare.I,
+			V: p,
+		},
+	}, nil
+}
+
+func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, error){
+	var result []Commitment
 
 	for _, cmt := range rawCommitments {
 		commitment := Commitment{
@@ -224,7 +486,7 @@ func (s *State) loadCommitments(rawCommitments []committee.Commitment) error {
 
 		serCommitments := &SerializedCommitment{}
 		if err := serCommitments.FromBytes(cmt.Data); err != nil {
-			return fmt.Errorf("failed unmarshaling serialized commitment: %v", err)
+			return nil, fmt.Errorf("failed unmarshaling serialized commitment: %v", err)
 		}
 
 		// Load commitments of current sender.
@@ -232,7 +494,7 @@ func (s *State) loadCommitments(rawCommitments []committee.Commitment) error {
 			p := suite.Point() // Create an empty curve point
 			// Assign it the commitment
 			if err := p.UnmarshalBinary(rawCmt); err != nil {
-				return fmt.Errorf("failed unmarshaling commitment (%s): %v", base64.StdEncoding.EncodeToString(rawCmt), err)
+				return nil, fmt.Errorf("failed unmarshaling commitment (%s): %v", base64.StdEncoding.EncodeToString(rawCmt), err)
 			}
 			commitment.Commitments = append(commitment.Commitments, p)
 		}
@@ -243,38 +505,45 @@ func (s *State) loadCommitments(rawCommitments []committee.Commitment) error {
 		// because the block can be replicated to other nodes and they need to to be able
 		// to reconstruct the randomness at a later point.
 		for _, rawEncShare := range serCommitments.EncShares {
-			encShare := &EncShare{}
-			if _, err := asn1.Unmarshal(rawEncShare, encShare); err != nil {
-				return fmt.Errorf("failed unmarshaling raw encryption share")
+			pubVerShare, err := encShareToPubVerShare(rawEncShare)
+			if err != nil {
+				return nil, err
 			}
-			p := suite.Point() // Create an empty curve point
-			// Assign it to an encryption share
-			if err := p.UnmarshalBinary(encShare.V); err != nil {
-				return fmt.Errorf("failed unmarshaling encryption share (%s): %v", base64.StdEncoding.EncodeToString(encShare.V), err)
-			}
-
-			commitment.EncShares = append(commitment.EncShares, &pvss.PubVerShare{
-				P: dleq.Proof{}, // We don't need to verify the proof, as it is checked during consensus.
-				S: share.PubShare{
-					I: encShare.I,
-					V: p,
-				},
-			})
+			commitment.EncShares = append(commitment.EncShares, pubVerShare)
 		}
 
-		s.Commitments = append(s.Commitments, commitment)
-
+		result = append(result, commitment)
 	} // for
 
-	return nil
+	return result, nil
+
 }
 
-func (s *State) ToBytes() []byte {
-	panic("implement me")
+type Header struct {
+	RemainingRounds int32
+	CommitteeIncarnation int32
+	BodyDigest string
 }
 
-type RawState struct {
+func (h Header) Bytes() []byte {
+	headerBytes, err := asn1.Marshal(h)
+	if err != nil {
+		panic(err)
+	}
+	return headerBytes
+}
+
+type Body struct {
 	Commitments []committee.Commitment
+	ReconShares []committee.ReconShare
+}
+
+func (b Body) Bytes() []byte {
+	bodyBytes, err := asn1.Marshal(b)
+	if err != nil {
+		panic(err)
+	}
+	return bodyBytes
 }
 
 type Commitment struct {
@@ -423,4 +692,10 @@ type SerializedProof struct {
 	R  []byte
 	VG []byte
 	VH []byte
+}
+
+func digest(bytes []byte) string {
+	h := sha256.New()
+	h.Write(bytes)
+	return hex.EncodeToString(h.Sum(nil))
 }
