@@ -1,3 +1,8 @@
+/*
+Copyright IBM Corp. All Rights Reserved.
+SPDX-License-Identifier: Apache-2.0
+*/
+
 package cs
 
 import (
@@ -9,6 +14,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/big"
+	"math/rand"
 	"reflect"
 
 	committee "github.com/SmartBFT-Go/randomcommittees/pkg"
@@ -27,15 +34,15 @@ var (
 
 type CommitteeSelection struct {
 	// Configuration
-	id      uint32
+	id       uint32
 	ourIndex int
-	sk      kyber.Scalar
-	pk      kyber.Point
-	pubKeys []kyber.Point
+	sk       kyber.Scalar
+	pk       kyber.Point
+	pubKeys  []kyber.Point
 	// State
 	commitment          *Commitment
 	commitmentInRawForm *committee.Commitment
-	state *State
+	state               *State
 }
 
 func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) ([]byte, []byte, error) {
@@ -72,7 +79,6 @@ func (cs *CommitteeSelection) Initialize(ID uint32, privateKey []byte, nodes com
 	if err != nil {
 		return err
 	}
-
 
 	// Initialize public keys in EC point form
 	for _, pubKey := range nodes.PubKeys() {
@@ -116,7 +122,7 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 	feedback := committee.Feedback{}
 
 	newState, isState := state.(*State)
-	if ! isState {
+	if !isState {
 		return feedback, nil, fmt.Errorf("expected to receive a committee.State state but got %v", reflect.TypeOf(state))
 	}
 
@@ -156,7 +162,6 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 		cs.state.body.Commitments = append(cs.state.body.Commitments, input.Commitments[i])
 	}
 
-
 	// We check if the state has changed during this invocation
 	if changed {
 		cs.state.bodyBytes = cs.state.body.Bytes()
@@ -186,13 +191,46 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 			return feedback, state, err
 		}
 
-		// TODO: pick the committee from the secret and assign it
-		_ = secret
+		feedback.NextCommittee = SelectCommittee(input.NextConfig, []byte(digest(secret)))
 	}
-
-
 	return feedback, state, nil
 
+}
+
+func SelectCommittee(config committee.Config, seed []byte) []uint32 {
+	failureChance := big.NewRat(1, config.InverseFailureChance)
+	expectedCommitteeSize := CommitteeSize(int64(len(config.Nodes)), config.FailedTotalNodesPercentage, *failureChance)
+
+	ids := randomIntList(weightedList(config.Weights))
+	return ids.permute(seed).distinctPrefixOfSize(expectedCommitteeSize)
+}
+
+func mapToSlice(m map[uint32]struct{}) []uint32 {
+	var res []uint32
+	for k := range m {
+		res = append(res, k)
+	}
+	return res
+}
+
+type randomness struct {
+	seed  []byte
+	state []byte
+}
+
+func (r *randomness) Int63() int64 {
+	if len(r.state) == 0 {
+		r.state = sha256Hash(r.seed)
+		r.seed = sha256Hash(r.seed)
+	}
+	defer func() {
+		r.state = r.state[8:]
+	}()
+	return int64(binary.BigEndian.Uint64(r.state[:8]))
+}
+
+func (r *randomness) Seed(seed int64) {
+	panic("this random source should not be seeded")
 }
 
 func (cs *CommitteeSelection) VerifyCommitment(commitment committee.Commitment, key committee.PublicKey) error {
@@ -237,8 +275,6 @@ func recoverSecret(decShares []*pvss.PubVerShare, t int, n int) (kyber.Point, er
 	return share.RecoverCommit(suite, shares, t, n)
 }
 
-
-
 func (cs *CommitteeSelection) createReconShares() ([]committee.ReconShare, error) {
 	var res []committee.ReconShare
 	for _, cmt := range cs.state.commitments {
@@ -269,7 +305,7 @@ func decShareToReconShare(from uint32, decryptedShare *pvss.PubVerShare) (*commi
 	proof := Proof{
 		Proofs: []dleq.Proof{
 			{
-				R: p.R,
+				R:  p.R,
 				VG: p.VG,
 				VH: p.VH,
 			},
@@ -294,7 +330,7 @@ func decShareToReconShare(from uint32, decryptedShare *pvss.PubVerShare) (*commi
 	}
 
 	return &committee.ReconShare{
-		Data: rawDecShare,
+		Data:  rawDecShare,
 		Proof: proofBytes,
 		About: from,
 	}, nil
@@ -308,7 +344,7 @@ func decShare(x kyber.Scalar, encShare *pvss.PubVerShare) (*pvss.PubVerShare, er
 	if err != nil {
 		return nil, fmt.Errorf("failed creating DLEQ proof: %v", err)
 	}
-	return &pvss.PubVerShare{S: *share,P: *P}, nil
+	return &pvss.PubVerShare{S: *share, P: *P}, nil
 }
 
 func (cs *CommitteeSelection) loadOurCommitment(commitments []Commitment) error {
@@ -378,9 +414,9 @@ func (cs *CommitteeSelection) commit() (shares []*pvss.PubVerShare, commitments 
 
 type State struct {
 	commitments []Commitment
-	header Header
-	body   Body
-	bodyBytes []byte
+	header      Header
+	body        Body
+	bodyBytes   []byte
 }
 
 func (s *State) Initialize(rawState []byte) error {
@@ -456,7 +492,7 @@ func (s *State) loadCommitments(rawCommitments []committee.Commitment) error {
 	return err
 }
 
-func encShareToPubVerShare(rawEncShare []byte) (*pvss.PubVerShare, error){
+func encShareToPubVerShare(rawEncShare []byte) (*pvss.PubVerShare, error) {
 	encShare := &EncShare{}
 	if _, err := asn1.Unmarshal(rawEncShare, encShare); err != nil {
 		return nil, fmt.Errorf("failed unmarshaling raw encryption share")
@@ -476,7 +512,7 @@ func encShareToPubVerShare(rawEncShare []byte) (*pvss.PubVerShare, error){
 	}, nil
 }
 
-func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, error){
+func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, error) {
 	var result []Commitment
 
 	for _, cmt := range rawCommitments {
@@ -520,9 +556,9 @@ func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, err
 }
 
 type Header struct {
-	RemainingRounds int32
+	RemainingRounds      int32
 	CommitteeIncarnation int32
-	BodyDigest string
+	BodyDigest           string
 }
 
 func (h Header) Bytes() []byte {
@@ -695,7 +731,46 @@ type SerializedProof struct {
 }
 
 func digest(bytes []byte) string {
+	return hex.EncodeToString(sha256Hash(bytes))
+}
+
+func sha256Hash(bytes []byte) []byte {
 	h := sha256.New()
 	h.Write(bytes)
-	return hex.EncodeToString(h.Sum(nil))
+	return h.Sum(nil)
+}
+
+func weightedList(wl []committee.Weight) []uint32 {
+	res := make(randomIntList, 0)
+	for _, weight := range wl {
+		for i := 0; i < int(weight.Weight); i++ {
+			res = append(res, uint32(weight.ID))
+		}
+	}
+	return res
+}
+
+type randomIntList []uint32
+
+func (l randomIntList) permute(seed []byte) randomIntList {
+	if l == nil {
+		return nil
+	}
+	var permutedIDs randomIntList
+	r := rand.New(&randomness{seed: seed})
+	for _, index := range r.Perm(len(l)) {
+		permutedIDs = append(permutedIDs, l[index])
+	}
+	return permutedIDs
+}
+
+func (l randomIntList) distinctPrefixOfSize(size int) randomIntList {
+	res := make(map[uint32]struct{})
+	for _, id := range l {
+		if len(res) == size {
+			break
+		}
+		res[id] = struct{}{}
+	}
+	return mapToSlice(res)
 }
