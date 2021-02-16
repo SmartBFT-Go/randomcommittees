@@ -1,3 +1,8 @@
+/*
+Copyright IBM Corp. All Rights Reserved.
+SPDX-License-Identifier: Apache-2.0
+*/
+
 package cs
 
 import (
@@ -9,6 +14,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/big"
 	"math/rand"
 	"reflect"
 
@@ -187,36 +193,16 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 
 		feedback.NextCommittee = SelectCommittee(input.NextConfig, []byte(digest(secret)))
 	}
-
 	return feedback, state, nil
 
 }
 
 func SelectCommittee(config committee.Config, seed []byte) []uint32 {
-	var ids []uint32
-	for _, weight := range config.Weights {
-		for i := 0; i < int(weight.Weight); i++ {
-			ids = append(ids, uint32(weight.ID))
-		}
-	}
+	failureChance := big.NewRat(1, config.InverseFailureChance)
+	expectedCommitteeSize := CommitteeSize(int64(len(config.Nodes)), config.FailedTotalNodesPercentage, *failureChance)
 
-	r := rand.New(&randomness{seed: seed})
-
-	var permutedIDs []uint32
-	for _, index := range r.Perm(len(ids)) {
-		permutedIDs = append(permutedIDs, ids[index])
-	}
-
-	// TODO: Adjust committee size according to formula
-	expectedCommitteeSize := len(config.Nodes)
-	committee := make(map[uint32]struct{})
-	for _, id := range permutedIDs {
-		if len(committee) == expectedCommitteeSize {
-			break
-		}
-		committee[id] = struct{}{}
-	}
-	return mapToSlice(committee)
+	ids := randomIntList(weightedList(config.Weights))
+	return ids.permute(seed).distinctPrefixOfSize(expectedCommitteeSize)
 }
 
 func mapToSlice(m map[uint32]struct{}) []uint32 {
@@ -752,4 +738,39 @@ func sha256Hash(bytes []byte) []byte {
 	h := sha256.New()
 	h.Write(bytes)
 	return h.Sum(nil)
+}
+
+func weightedList(wl []committee.Weight) []uint32 {
+	res := make(randomIntList, 0)
+	for _, weight := range wl {
+		for i := 0; i < int(weight.Weight); i++ {
+			res = append(res, uint32(weight.ID))
+		}
+	}
+	return res
+}
+
+type randomIntList []uint32
+
+func (l randomIntList) permute(seed []byte) randomIntList {
+	if l == nil {
+		return nil
+	}
+	var permutedIDs randomIntList
+	r := rand.New(&randomness{seed: seed})
+	for _, index := range r.Perm(len(l)) {
+		permutedIDs = append(permutedIDs, l[index])
+	}
+	return permutedIDs
+}
+
+func (l randomIntList) distinctPrefixOfSize(size int) randomIntList {
+	res := make(map[uint32]struct{})
+	for _, id := range l {
+		if len(res) == size {
+			break
+		}
+		res[id] = struct{}{}
+	}
+	return mapToSlice(res)
 }
