@@ -23,6 +23,7 @@ type ReconShare struct {
 	Data  []byte // Data should be persisted for future initialization
 	Proof []byte // Proof denotes the proof the data was honestly computed
 	About uint32 // About denotes whose randomness are we reconstructing
+	From  uint32 // Who sent this ReconShare
 }
 
 // Config is the configuration of a committee

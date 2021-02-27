@@ -20,10 +20,10 @@ type Selection interface {
 	Process(State, Input) (Feedback, State, error)
 	// VerifyCommitment should be called whenever the node receives a commitment
 	// and before passing it to the library or persisting it
-	VerifyCommitment(Commitment, PublicKey) error
+	VerifyCommitment(Commitment) error
 	// VerifyReconShare should be called whenever the node receives a ReconShare
 	// and before passing it to the library or persisting it
-	VerifyReconShare(ReconShare, PublicKey) error
+	VerifyReconShare(ReconShare) error
 }
 
 type committeeSelection struct {
@@ -42,11 +42,11 @@ func (c *committeeSelection) Process(state State, input Input) (Feedback, State,
 	return Feedback{}, &basicState{}, nil
 }
 
-func (c *committeeSelection) VerifyCommitment(commitment Commitment, key PublicKey) error {
+func (c *committeeSelection) VerifyCommitment(commitment Commitment) error {
 	return nil
 }
 
-func (c *committeeSelection) VerifyReconShare(share ReconShare, key PublicKey) error {
+func (c *committeeSelection) VerifyReconShare(share ReconShare) error {
 	return nil
 }
 
