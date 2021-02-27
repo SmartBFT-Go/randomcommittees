@@ -17,28 +17,20 @@ import (
 	"math/big"
 	"math/rand"
 	"reflect"
+	"sort"
 
 	committee "github.com/SmartBFT-Go/randomcommittees/pkg"
 	"go.dedis.ch/kyber/v3"
-	"go.dedis.ch/kyber/v3/proof/dleq"
-	"go.dedis.ch/kyber/v3/share"
-	"go.dedis.ch/kyber/v3/share/pvss"
-	"go.dedis.ch/kyber/v3/suites"
-)
-
-var (
-	suite = suites.MustFind("Ed25519")
-	g     = suite.Point().Base()
-	h     = suite.Point().Pick(suite.XOF([]byte("Random Committee Selection")))
 )
 
 type CommitteeSelection struct {
 	// Configuration
-	id       uint32
-	ourIndex int
-	sk       kyber.Scalar
-	pk       kyber.Point
-	pubKeys  []kyber.Point
+	id        uint32
+	ourIndex  int
+	sk        kyber.Scalar
+	pk        kyber.Point
+	pubKeys   []kyber.Point
+	ids2Index map[int32]int
 	// State
 	commitment          *Commitment
 	commitmentInRawForm *committee.Commitment
@@ -47,7 +39,7 @@ type CommitteeSelection struct {
 
 func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) ([]byte, []byte, error) {
 	sk := suite.Scalar().Pick(suite.RandomStream())
-	pk := suite.Point().Mul(sk, nil)
+	pk := h.Clone().Mul(sk, nil)
 	pkRaw, err := pk.MarshalBinary()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed marshaling public key: %v", err)
@@ -72,6 +64,11 @@ func (cs *CommitteeSelection) Initialize(ID uint32, privateKey []byte, nodes com
 	pkRaw, err := cs.pk.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("failed marshaling our public key: %v", err)
+	}
+
+	cs.ids2Index = make(map[int32]int)
+	for i, node := range nodes {
+		cs.ids2Index[node.ID] = i
 	}
 
 	// Locate our index within the nodes according to the ID and public keys
@@ -186,12 +183,12 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 	}
 
 	if receivedReconShares {
-		secret, err := cs.secretFromReconShares(input.ReconShares)
+		combinedSecret, err := cs.secretFromReconShares(input.ReconShares)
 		if err != nil {
 			return feedback, state, err
 		}
 
-		feedback.NextCommittee = SelectCommittee(input.NextConfig, []byte(digest(secret)))
+		feedback.NextCommittee = SelectCommittee(input.NextConfig, []byte(digest(combinedSecret)))
 	}
 	return feedback, state, nil
 
@@ -229,122 +226,130 @@ func (r *randomness) Int63() int64 {
 	return int64(binary.BigEndian.Uint64(r.state[:8]))
 }
 
-func (r *randomness) Seed(seed int64) {
+func (r *randomness) Seed(_ int64) {
 	panic("this random source should not be seeded")
 }
 
-func (cs *CommitteeSelection) VerifyCommitment(commitment committee.Commitment, key committee.PublicKey) error {
-	panic("implement me")
+func (cs *CommitteeSelection) VerifyCommitment(commitment committee.Commitment) error {
+	cms, err := refineCommitments([]committee.Commitment{commitment})
+	if err != nil {
+		return fmt.Errorf("failed refining commitments: %v", err)
+	}
+
+	if len(cms) != 1 {
+		return fmt.Errorf("refining succeeded but got %d commitments instead of 1", len(cms))
+	}
+
+	for _, cmt := range cms {
+		pvss := PVSS{
+			Proofs:               cmt.Proofs,
+			EncryptedEvaluations: cmt.EncShares,
+			Commitments:          cmt.Commitments,
+		}
+
+		if err := pvss.VerifyCommit(cs.pubKeys); err != nil {
+			return fmt.Errorf("commit from %d isn't sound: %v", cmt.From, err)
+		}
+	}
+
+	return nil
 }
 
-func (cs *CommitteeSelection) VerifyReconShare(share committee.ReconShare, key committee.PublicKey) error {
-	panic("implement me")
+func (cs *CommitteeSelection) VerifyReconShare(share committee.ReconShare) error {
+	d := suite.Point()
+	if err := d.UnmarshalBinary(share.Data); err != nil {
+		return fmt.Errorf("failed unmarshaling reconshare: %v", err)
+	}
+
+	// Locate the encrypted share
+	e, pk, err := cs.locateEncryptedShares(share.About, int32(share.From))
+	if err != nil {
+		return err
+	}
+
+	proof := SerializedProof{}
+	if err := proof.Initialize(share.Proof); err != nil {
+		return fmt.Errorf("failed unmarshaling decryption proof: %v", err)
+	}
+
+	return VerifyDecShare(pk, d, e, proof)
 }
 
 func (cs *CommitteeSelection) secretFromReconShares(reconShares []committee.ReconShare) ([]byte, error) {
-	var shares []*share.PubShare
+	reconstructedSecrets, err := reconstructSecrets(reconShares)
+	if err != nil {
+		return nil, err
+	}
+
+	bb := bytes.Buffer{}
+
+	for _, secret := range reconstructedSecrets {
+		secretAsBytes, err := secret.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("failed marshaling secret to bytes: %v", err)
+		}
+		bb.Write(secretAsBytes)
+	}
+
+	return bb.Bytes(), nil
+}
+
+func reconstructSecrets(reconShares []committee.ReconShare) ([]kyber.Point, error) {
+	// Index2Share is a mapping from scalar evaluation point to the value of a share
+	committerId2SharesByIndex := make(map[uint32]Index2Share)
 	for _, reconShare := range reconShares {
-		decShare, err := encShareToPubVerShare(reconShare.Data)
+		m, exists := committerId2SharesByIndex[reconShare.About]
+		if !exists {
+			m = make(map[int64]kyber.Point)
+			committerId2SharesByIndex[reconShare.About] = m
+		}
+
+		decShare, err := refineReconShare(reconShare.Data)
 		if err != nil {
 			return nil, fmt.Errorf("failed processing decryption share of %d: %v", reconShare.About, err)
 		}
-		shares = append(shares, &decShare.S)
+
+		m[int64(reconShare.From)] = decShare
 	}
 
-	t := cs.threshold()
-	n := len(cs.pubKeys)
-
-	secret, err := share.RecoverCommit(suite, shares, t, n)
-	if err != nil {
-		return nil, fmt.Errorf("failed reconstructing secret: %v", err)
+	committerIds2ReconstructedSecrets := make(Source2Points)
+	for committerId, sharesByIndex := range committerId2SharesByIndex {
+		reconstructedShare := ReconstructShare(sharesByIndex)
+		committerIds2ReconstructedSecrets[committerId] = reconstructedShare
 	}
 
-	secretAsBytes, err := secret.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("failed marshaling secret to bytes: %v", err)
-	}
-
-	return secretAsBytes, nil
-}
-
-func recoverSecret(decShares []*pvss.PubVerShare, t int, n int) (kyber.Point, error) {
-	var shares []*share.PubShare
-	for _, s := range decShares {
-		shares = append(shares, &s.S)
-	}
-	return share.RecoverCommit(suite, shares, t, n)
+	return committerIds2ReconstructedSecrets.SortedPoints(), nil
 }
 
 func (cs *CommitteeSelection) createReconShares() ([]committee.ReconShare, error) {
 	var res []committee.ReconShare
 	for _, cmt := range cs.state.commitments {
 		ourShare := cmt.EncShares[cs.ourIndex]
-		decryptedShare, err := decShare(cs.sk, ourShare)
+		d, proof, err := DecryptShare(cs.sk, ourShare)
 		if err != nil {
-			return nil, fmt.Errorf("failed decrypting our own share(%v): %v", ourShare, err)
+			return nil, fmt.Errorf("failed decrypting our share: %v", err)
 		}
 
-		reconShare, err := decShareToReconShare(uint32(cmt.From), decryptedShare)
+		proofBytes, err := proof.ToBytes()
 		if err != nil {
 			return nil, err
 		}
 
-		res = append(res, *reconShare)
+		dBytes, err := d.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+
+		rs := committee.ReconShare{
+			Proof: proofBytes,
+			Data:  dBytes,
+			About: uint32(cmt.From), // The committer ID
+		}
+
+		res = append(res, rs)
 	}
 
 	return res, nil
-}
-
-func decShareToReconShare(from uint32, decryptedShare *pvss.PubVerShare) (*committee.ReconShare, error) {
-	decShareBytes, err := decryptedShare.S.V.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("failed decrypting shares")
-	}
-
-	p := decryptedShare.P
-	proof := Proof{
-		Proofs: []dleq.Proof{
-			{
-				R:  p.R,
-				VG: p.VG,
-				VH: p.VH,
-			},
-		},
-	}
-
-	proofBytes, err := proof.ToBytes()
-	if err != nil {
-		return nil, fmt.Errorf("failed marshaling proof: %v", err)
-	}
-
-	// We use here the EncShare struct even though it is a decryption,
-	// because their fields are equivalent.
-	decShare := EncShare{
-		I: decryptedShare.S.I,
-		V: decShareBytes,
-	}
-
-	rawDecShare, err := asn1.Marshal(decShare)
-	if err != nil {
-		return nil, fmt.Errorf("failed marshaling decryption share")
-	}
-
-	return &committee.ReconShare{
-		Data:  rawDecShare,
-		Proof: proofBytes,
-		About: from,
-	}, nil
-}
-
-func decShare(x kyber.Scalar, encShare *pvss.PubVerShare) (*pvss.PubVerShare, error) {
-	G := suite.Point().Base()
-	decryptedV := suite.Point().Mul(suite.Scalar().Inv(x), encShare.S.V)
-	share := &share.PubShare{I: encShare.S.I, V: decryptedV}
-	P, _, _, err := dleq.NewDLEQProof(suite, G, decryptedV, x)
-	if err != nil {
-		return nil, fmt.Errorf("failed creating DLEQ proof: %v", err)
-	}
-	return &pvss.PubVerShare{S: *share, P: *P}, nil
 }
 
 func (cs *CommitteeSelection) loadOurCommitment(commitments []Commitment) error {
@@ -367,15 +372,16 @@ func (cs *CommitteeSelection) loadOurCommitment(commitments []Commitment) error 
 }
 
 func (cs *CommitteeSelection) prepareCommitment() error {
-	shares, commitments, err := cs.commit()
-	if err != nil {
-		return fmt.Errorf("failed creating commitment: %v", err)
+	pvss := PVSS{}
+	if err := pvss.Commit(cs.threshold(), cs.sk, cs.pubKeys); err != nil {
+		return err
 	}
 
 	commitment := Commitment{
 		From:        int32(cs.id),
-		EncShares:   shares,
-		Commitments: commitments,
+		EncShares:   pvss.EncryptedEvaluations,
+		Commitments: pvss.Commitments,
+		Proofs:      pvss.Proofs,
 	}
 
 	rawCommitment, err := commitment.ToRawForm(cs.id)
@@ -397,19 +403,21 @@ func (cs *CommitteeSelection) threshold() int {
 	return t
 }
 
-func (cs *CommitteeSelection) commit() (shares []*pvss.PubVerShare, commitments []kyber.Point, err error) {
-	pubKeys := cs.pubKeys
-
-	secret := suite.Scalar().Pick(suite.RandomStream())
-
-	shares, commit, err := pvss.EncShares(suite, h, pubKeys, secret, cs.threshold())
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed computing encryption shares: %v", err)
+func commitmentOnPolynomialEvaluation(i *big.Int, commitments []kyber.Point) kyber.Point {
+	var points []kyber.Point
+	for j, c := range commitments {
+		exp := big.NewInt(0).Exp(i, big.NewInt(int64(j)), nil)
+		e := suite.Scalar().SetInt64(exp.Int64())
+		p := suite.Point().Mul(e, c)
+		points = append(points, p)
 	}
 
-	_, commitments = commit.Info()
-
-	return shares, commitments, nil
+	sum := points[0]
+	points = points[1:]
+	for _, p := range points {
+		sum = suite.Point().Add(sum, p)
+	}
+	return sum
 }
 
 type State struct {
@@ -492,24 +500,32 @@ func (s *State) loadCommitments(rawCommitments []committee.Commitment) error {
 	return err
 }
 
-func encShareToPubVerShare(rawEncShare []byte) (*pvss.PubVerShare, error) {
-	encShare := &EncShare{}
-	if _, err := asn1.Unmarshal(rawEncShare, encShare); err != nil {
-		return nil, fmt.Errorf("failed unmarshaling raw encryption share")
+func (cs *CommitteeSelection) locateEncryptedShares(committerID uint32, targetID int32) (e, pk kyber.Point, err error) {
+	// We search for the commitment in this committee according to the committer ID.
+	for _, cmt := range cs.state.commitments {
+		if cmt.From != int32(committerID) {
+			continue
+		}
+		// Once we found the commitment, we need to search the appropriate encrypted share that
+		// the committer has encrypted under that target node's public key.
+		target, exists := cs.ids2Index[targetID]
+		if !exists {
+			return nil, nil, fmt.Errorf("%d is not a valid ID", targetID)
+		}
+		e = cmt.EncShares[target]
+		pk = cs.pubKeys[target]
+		return
 	}
+	return nil, nil, fmt.Errorf("commitment of %d wasn't found", committerID)
+}
+
+func refineReconShare(rawEncShare []byte) (kyber.Point, error) {
 	p := suite.Point() // Create an empty curve point
 	// Assign it to an encryption share
-	if err := p.UnmarshalBinary(encShare.V); err != nil {
-		return nil, fmt.Errorf("failed unmarshaling encryption share (%s): %v", base64.StdEncoding.EncodeToString(encShare.V), err)
+	if err := p.UnmarshalBinary(rawEncShare); err != nil {
+		return nil, fmt.Errorf("failed unmarshaling encryption share (%s): %v", base64.StdEncoding.EncodeToString(rawEncShare), err)
 	}
-
-	return &pvss.PubVerShare{
-		P: dleq.Proof{}, // We don't need to verify the proof, as it is checked during consensus.
-		S: share.PubShare{
-			I: encShare.I,
-			V: p,
-		},
-	}, nil
+	return p, nil
 }
 
 func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, error) {
@@ -541,11 +557,11 @@ func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, err
 		// because the block can be replicated to other nodes and they need to to be able
 		// to reconstruct the randomness at a later point.
 		for _, rawEncShare := range serCommitments.EncShares {
-			pubVerShare, err := encShareToPubVerShare(rawEncShare)
-			if err != nil {
-				return nil, err
+			encShare := suite.Point()
+			if err := encShare.UnmarshalBinary(rawEncShare); err != nil {
+				return nil, fmt.Errorf("failed unmarshaling encryption share: %v", err)
 			}
-			commitment.EncShares = append(commitment.EncShares, pubVerShare)
+			commitment.EncShares = append(commitment.EncShares, encShare)
 		}
 
 		result = append(result, commitment)
@@ -582,43 +598,25 @@ func (b Body) Bytes() []byte {
 	return bodyBytes
 }
 
+type ReconShare struct {
+	D    kyber.Point
+	From int64
+}
+
 type Commitment struct {
 	From        int32
-	EncShares   []*pvss.PubVerShare // n encrypted shares and corresponding ZKPs
-	Commitments []kyber.Point       // f+1 commitments
+	EncShares   []kyber.Point // n encrypted shares and corresponding ZKPs
+	Commitments []kyber.Point // f+1 commitments
+	Proofs      SerializedProofs
 }
 
 func (cmt Commitment) ToRawForm(from uint32) (committee.Commitment, error) {
 	var z committee.Commitment
 
-	shares := cmt.EncShares
-	commitments := cmt.Commitments
-
-	proofs := Proof{}
-	for _, encShare := range shares {
-		proofs.Proofs = append(proofs.Proofs, encShare.P)
-	}
-
-	rawProofs, err := proofs.ToBytes()
-	if err != nil {
-		return z, fmt.Errorf("failed marshaling proofs: %v", err)
-	}
-
 	serializedCommitment := SerializedCommitment{}
 
-	for _, encShare := range shares {
-		index := encShare.S.I
-		value, err := encShare.S.V.MarshalBinary()
-		if err != nil {
-			return z, fmt.Errorf("failed marshaling encryption share value: %v", err)
-		}
-
-		rawEncShare := EncShare{
-			I: index,
-			V: value,
-		}
-
-		rawEncShareBytes, err := asn1.Marshal(rawEncShare)
+	for _, encShare := range cmt.EncShares {
+		rawEncShareBytes, err := encShare.MarshalBinary()
 		if err != nil {
 			return z, fmt.Errorf("failed marshaling raw encryption share: %v", err)
 		}
@@ -626,9 +624,7 @@ func (cmt Commitment) ToRawForm(from uint32) (committee.Commitment, error) {
 		serializedCommitment.EncShares = append(serializedCommitment.EncShares, rawEncShareBytes)
 	}
 
-	for i := range commitments {
-		commitment := commitments[i]
-
+	for _, commitment := range cmt.Commitments {
 		commitmentBytes, err := commitment.MarshalBinary()
 		if err != nil {
 			return z, fmt.Errorf("failed marshaling commitment: %v", err)
@@ -640,6 +636,11 @@ func (cmt Commitment) ToRawForm(from uint32) (committee.Commitment, error) {
 	serializedCommitmentBytes, err := serializedCommitment.ToBytes()
 	if err != nil {
 		return z, fmt.Errorf("failed serializing commitment: %v", err)
+	}
+
+	rawProofs, err := cmt.Proofs.ToBytes()
+	if err != nil {
+		return z, fmt.Errorf("failed marshaling proofs: %v", err)
 	}
 
 	return committee.Commitment{
@@ -661,73 +662,6 @@ func (scm SerializedCommitment) ToBytes() ([]byte, error) {
 func (scm *SerializedCommitment) FromBytes(bytes []byte) error {
 	_, err := asn1.Unmarshal(bytes, scm)
 	return err
-}
-
-type EncShare struct {
-	I int
-	V []byte
-}
-
-type Proof struct {
-	Proofs []dleq.Proof
-}
-
-func (p Proof) ToBytes() ([]byte, error) {
-
-	sps := SerializedProofs{}
-
-	for _, proof := range p.Proofs {
-
-		r, err := proof.R.MarshalBinary()
-		if err != nil {
-			return nil, fmt.Errorf("failed marshaling R in proof: %v", err)
-		}
-
-		vg, err := proof.VG.MarshalBinary()
-		if err != nil {
-			return nil, fmt.Errorf("failed marshaling VG in proof: %v", err)
-		}
-
-		vh, err := proof.VH.MarshalBinary()
-		if err != nil {
-			return nil, fmt.Errorf("failed marshaling VH in proof: %v", err)
-		}
-
-		sps.Proofs = append(sps.Proofs, SerializedProof{
-			R:  r,
-			VH: vh,
-			VG: vg,
-		})
-	}
-	return sps.ToBytes()
-}
-
-type SerializedProofs struct {
-	Proofs []SerializedProof
-}
-
-func (sps SerializedProofs) ToBytes() ([]byte, error) {
-	return asn1.Marshal(sps)
-}
-
-func (sps *SerializedProofs) Initialize(bytes []byte) error {
-	_, err := asn1.Unmarshal(bytes, sps)
-	return err
-}
-
-func (sp SerializedProof) ToBytes() ([]byte, error) {
-	return asn1.Marshal(sp)
-}
-
-func (sp *SerializedProof) Initialize(bytes []byte) error {
-	_, err := asn1.Unmarshal(bytes, sp)
-	return err
-}
-
-type SerializedProof struct {
-	R  []byte
-	VG []byte
-	VH []byte
 }
 
 func digest(bytes []byte) string {
@@ -773,4 +707,24 @@ func (l randomIntList) distinctPrefixOfSize(size int) randomIntList {
 		res[id] = struct{}{}
 	}
 	return mapToSlice(res)
+}
+
+// Source2Points defines curve points indexed by their source
+type Source2Points map[uint32]kyber.Point
+
+// SortedShares returns the points sorted by their sources
+func (c2s Source2Points) SortedPoints() []kyber.Point {
+	var sources []int
+	for source := range c2s {
+		sources = append(sources, int(source))
+	}
+
+	sort.Ints(sources)
+
+	var res []kyber.Point
+	for _, source := range sources {
+		p := c2s[uint32(source)]
+		res = append(res, p)
+	}
+	return res
 }
