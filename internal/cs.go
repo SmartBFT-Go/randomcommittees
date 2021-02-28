@@ -373,7 +373,7 @@ func (cs *CommitteeSelection) loadOurCommitment(commitments []Commitment) error 
 
 func (cs *CommitteeSelection) prepareCommitment() error {
 	pvss := PVSS{}
-	if err := pvss.Commit(cs.threshold(), cs.sk, cs.pubKeys); err != nil {
+	if err := pvss.Commit(cs.threshold(), cs.pubKeys); err != nil {
 		return err
 	}
 

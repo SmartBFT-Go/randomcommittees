@@ -33,7 +33,7 @@ type PVSS struct {
 	Proofs               SerializedProofs
 }
 
-func (pvss *PVSS) Commit(threshold int, privateKey kyber.Scalar, pubKeys []kyber.Point) error {
+func (pvss *PVSS) Commit(threshold int, pubKeys []kyber.Point) error {
 	*pvss = PVSS{} // Restart internal state
 
 	secret := suite.Scalar().Pick(suite.RandomStream())
@@ -57,11 +57,11 @@ func (pvss *PVSS) Commit(threshold int, privateKey kyber.Scalar, pubKeys []kyber
 
 	// Create DLEQ ZKPs that prove that commitments on evaluations have
 	// the same discrete log as the encryptions.
-	for _, pk := range pubKeys {
+	for i, pk := range pubKeys {
 		proof, err := DLEQ{
 			G1: g.Clone(),
 			G2: pk.Clone(),
-		}.Prove(privateKey)
+		}.Prove(polynomialEvaluationsPerPartyIndex[i].V)
 		if err != nil {
 			return err
 		}
@@ -116,10 +116,12 @@ func VerifyDecShare(pk, d, e kyber.Point, proof SerializedProof) error {
 	// 2) e  = d^α
 	dleq := DLEQ{
 		G1: h.Clone(),
-		G2: d,
+		G2: d.Clone(),
 		H1: pk.Clone(),
-		H2: e,
+		H2: e.Clone(),
 	}
+
+	fmt.Println(dleq.G1, dleq.G2)
 
 	if err := dleq.Verify(proof); err != nil {
 		return fmt.Errorf("failed verifying share decryption proof: %v", err)
@@ -136,8 +138,10 @@ func DecryptShare(privateKey kyber.Scalar, e kyber.Point) (kyber.Point, Serializ
 	// 2) encrypted share is d^α
 	dleq := DLEQ{
 		G1: h.Clone(),
-		G2: d,
+		G2: d.Clone(),
 	}
+
+	fmt.Println(dleq.G1, dleq.G2)
 
 	proof, err := dleq.Prove(privateKey)
 	if err != nil {
@@ -162,6 +166,8 @@ func (dleq DLEQ) Prove(alpha kyber.Scalar) (SerializedProof, error) {
 	c := hashBasedRandomOracle(a1, a2)
 	alphaTimesC := suite.Scalar().Mul(alpha, c)
 	r := suite.Scalar().Sub(w, alphaTimesC)
+
+	fmt.Println(">>>", alpha, c, r)
 
 	rBytes, err := r.MarshalBinary()
 	if err != nil {
