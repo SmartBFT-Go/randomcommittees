@@ -39,7 +39,7 @@ type CommitteeSelection struct {
 
 func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) ([]byte, []byte, error) {
 	sk := suite.Scalar().Pick(suite.RandomStream())
-	pk := h.Clone().Mul(sk, nil)
+	pk := suite.Point().Mul(sk, h)
 	pkRaw, err := pk.MarshalBinary()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed marshaling public key: %v", err)

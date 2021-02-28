@@ -121,8 +121,6 @@ func VerifyDecShare(pk, d, e kyber.Point, proof SerializedProof) error {
 		H2: e.Clone(),
 	}
 
-	fmt.Println(dleq.G1, dleq.G2)
-
 	if err := dleq.Verify(proof); err != nil {
 		return fmt.Errorf("failed verifying share decryption proof: %v", err)
 	}
@@ -140,8 +138,6 @@ func DecryptShare(privateKey kyber.Scalar, e kyber.Point) (kyber.Point, Serializ
 		G1: h.Clone(),
 		G2: d.Clone(),
 	}
-
-	fmt.Println(dleq.G1, dleq.G2)
 
 	proof, err := dleq.Prove(privateKey)
 	if err != nil {
@@ -166,8 +162,6 @@ func (dleq DLEQ) Prove(alpha kyber.Scalar) (SerializedProof, error) {
 	c := hashBasedRandomOracle(a1, a2)
 	alphaTimesC := suite.Scalar().Mul(alpha, c)
 	r := suite.Scalar().Sub(w, alphaTimesC)
-
-	fmt.Println(">>>", alpha, c, r)
 
 	rBytes, err := r.MarshalBinary()
 	if err != nil {
