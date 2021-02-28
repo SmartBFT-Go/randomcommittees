@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package cs
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -119,17 +118,16 @@ func TestCommitVerify(t *testing.T) {
 
 func TestCommitDecryptVerify(t *testing.T) {
 	sk := suite.Scalar().Pick(suite.RandomStream())
-	pk := h.Clone().Mul(sk, nil) // h^x
+	pk := suite.Point().Mul(sk, h)
 
-	y := suite.Scalar().Pick(suite.RandomStream())
-	e := suite.Point().Mul(y, pk) // h^{xy}
+	pvss := PVSS{}
+	err := pvss.Commit(1, []kyber.Point{pk})
+	assert.NoError(t, err)
+
+	e := pvss.EncryptedEvaluations[0]
 
 	d, proof, err := DecryptShare(sk, e)
 	assert.NoError(t, err)
-
-	d2 := suite.Point().Mul(y, h) // h^y
-
-	fmt.Println(d2.Equal(d))
 
 	err = VerifyDecShare(pk, d, e, proof)
 	assert.NoError(t, err)
