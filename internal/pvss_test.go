@@ -8,9 +8,44 @@ package cs
 import (
 	"testing"
 
+	"go.dedis.ch/kyber/v3/share"
+
 	"github.com/stretchr/testify/assert"
 	"go.dedis.ch/kyber/v3"
 )
+
+func TestReconstructShare(t *testing.T) {
+	secret := suite.Scalar().Pick(suite.RandomStream())
+
+	polynomialCoefficients := share.NewPriPoly(suite, 3, secret, suite.RandomStream())
+
+	polynomialEvaluationsPerPartyIndex := polynomialCoefficients.Shares(5)
+
+	// We want to take every combination of 3 out of 5 indices
+	var combinations [][]int
+	combinations = append(combinations, []int{1, 2, 3})
+	combinations = append(combinations, []int{1, 2, 4})
+	combinations = append(combinations, []int{1, 2, 5})
+	combinations = append(combinations, []int{1, 3, 4})
+	combinations = append(combinations, []int{1, 3, 5})
+	combinations = append(combinations, []int{1, 4, 5})
+	combinations = append(combinations, []int{2, 3, 4})
+	combinations = append(combinations, []int{2, 3, 5})
+	combinations = append(combinations, []int{2, 4, 5})
+	combinations = append(combinations, []int{3, 4, 5})
+
+	expected := suite.Point().Mul(secret, h)
+
+	for _, combination := range combinations {
+		idx2share := make(Index2Share)
+		for _, i := range combination {
+			idx2share[int64(i)] = suite.Point().Mul(polynomialEvaluationsPerPartyIndex[i-1].V, h)
+		}
+
+		actual := ReconstructShare(idx2share)
+		assert.True(t, expected.Equal(actual))
+	}
+}
 
 func TestDLEQ(t *testing.T) {
 	g1 := suite.Point().Pick(suite.RandomStream())

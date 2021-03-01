@@ -21,6 +21,7 @@ import (
 
 	committee "github.com/SmartBFT-Go/randomcommittees/pkg"
 	"go.dedis.ch/kyber/v3"
+	"go.dedis.ch/kyber/v3/util/random"
 )
 
 type CommitteeSelection struct {
@@ -38,7 +39,7 @@ type CommitteeSelection struct {
 }
 
 func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) ([]byte, []byte, error) {
-	sk := suite.Scalar().Pick(suite.RandomStream())
+	sk := suite.Scalar().Pick(random.New(rand))
 	pk := suite.Point().Mul(sk, h)
 	pkRaw, err := pk.MarshalBinary()
 	if err != nil {
