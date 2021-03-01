@@ -96,6 +96,15 @@ func (pvss PVSS) VerifyCommit(pubKeys []kyber.Point) error {
 // Index2Share maps an index in [1, n] to its share
 type Index2Share map[int64]kyber.Point
 
+func (i2s Index2Share) keys() []int64 {
+	var res []int64
+	for k := range i2s {
+		res = append(res, k)
+	}
+
+	return res
+}
+
 func ReconstructShare(x2y Index2Share) kyber.Point {
 	sss := SSS{
 		Threshold: len(x2y),
@@ -104,7 +113,7 @@ func ReconstructShare(x2y Index2Share) kyber.Point {
 	res := suite.Point().Null()
 
 	for x, y := range x2y {
-		coefficient := sss.LagrangeCoefficient(x)
+		coefficient := sss.LagrangeCoefficient(x, x2y.keys()...)
 		res.Add(res, suite.Point().Mul(coefficient, y)) // {s_i}^{lambda_i}
 	}
 	return res
@@ -265,16 +274,16 @@ type SSS struct {
 	Threshold int
 }
 
-func (sss *SSS) LagrangeCoefficient(i int64) kyber.Scalar {
+func (sss *SSS) LagrangeCoefficient(evaluatedAt int64, evaluationPoints ...int64) kyber.Scalar {
 	// Initialize total product to be the identity element
 	prod := suite.Scalar().One()
 
-	for j := int64(1); j <= int64(sss.Threshold); j++ {
-		if i == j {
+	for _, j := range evaluationPoints {
+		if evaluatedAt == j {
 			continue
 		}
 
-		iScalar := suite.Scalar().SetInt64(i)
+		iScalar := suite.Scalar().SetInt64(evaluatedAt)
 		jScalar := suite.Scalar().SetInt64(j)
 
 		nominator := jScalar.Clone()                        // j
