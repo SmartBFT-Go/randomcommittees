@@ -24,9 +24,13 @@ import (
 	"go.dedis.ch/kyber/v3/util/random"
 )
 
+type CommitteeSelector func(config committee.Config, seed []byte) []int32
+
 type CommitteeSelection struct {
+	SelectCommittee CommitteeSelector
+	Logger committee.Logger
 	// Configuration
-	id        uint32
+	id        int32
 	ourIndex  int
 	sk        kyber.Scalar
 	pk        kyber.Point
@@ -49,18 +53,23 @@ func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) ([]byte, []byte, e
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed marshaling private key: %v", err)
 	}
+
+	cs.Logger.Infof("Generated public key: %s", base64.StdEncoding.EncodeToString(pkRaw))
+
 	return pkRaw, skRaw, nil
 }
 
-func (cs *CommitteeSelection) Initialize(ID uint32, privateKey []byte, nodes committee.Nodes) error {
+func (cs *CommitteeSelection) Initialize(ID int32, privateKey []byte, nodes committee.Nodes) error {
 	sk := suite.Scalar()
 	if err := sk.UnmarshalBinary(privateKey); err != nil {
 		return fmt.Errorf("failed unmarshaling secret key: %v", err)
 	}
 
 	cs.sk = sk
-	cs.pk = suite.Point().Mul(cs.sk, nil)
+	cs.pk = suite.Point().Mul(cs.sk, h)
 	cs.id = ID
+
+	cs.Logger.Infof("ID: %d, nodes: %s", ID, nodes)
 
 	pkRaw, err := cs.pk.MarshalBinary()
 	if err != nil {
@@ -70,6 +79,7 @@ func (cs *CommitteeSelection) Initialize(ID uint32, privateKey []byte, nodes com
 	cs.ids2Index = make(map[int32]int)
 	for i, node := range nodes {
 		cs.ids2Index[node.ID] = i
+		cs.Logger.Infof("%d --> %d", i, node.ID)
 	}
 
 	// Locate our index within the nodes according to the ID and public keys
@@ -91,7 +101,7 @@ func (cs *CommitteeSelection) Initialize(ID uint32, privateKey []byte, nodes com
 }
 
 // IsNodeInConfig returns whether the given node is in the config.
-func IsNodeInConfig(id uint32, expectedPubKey []byte, nodes committee.Nodes) (int, error) {
+func IsNodeInConfig(id int32, expectedPubKey []byte, nodes committee.Nodes) (int, error) {
 	for i, node := range nodes {
 		if node.ID != int32(id) {
 			continue
@@ -126,6 +136,11 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 
 	// This state is different than the one we have, so assign the updated state.
 	if cs.state == nil || newState.header.BodyDigest != cs.state.header.BodyDigest {
+		prevDigest := `""`
+		if cs.state != nil {
+			prevDigest = cs.state.header.BodyDigest
+		} else {}
+		cs.Logger.Infof("State changed: %s --> %s", prevDigest, newState.header.BodyDigest)
 		cs.state = newState
 	}
 
@@ -154,6 +169,10 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 		return feedback, nil, fmt.Errorf("failed extracting raw commitments from input: %v", err)
 	}
 
+	if len(input.Commitments) > 0 {
+		cs.Logger.Infof("Received %d commitments and refined %d commitments", len(input.Commitments), newCommitments)
+	}
+
 	for i := 0; i < len(newCommitments) && len(cs.state.commitments) < cs.threshold(); i++ {
 		changed = true
 		cs.state.commitments = append(cs.state.commitments, newCommitments[i])
@@ -163,11 +182,14 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 	// We check if the state has changed during this invocation
 	if changed {
 		cs.state.bodyBytes = cs.state.body.Bytes()
+		prevDigest := cs.state.header.BodyDigest
 		cs.state.header.BodyDigest = digest(cs.state.bodyBytes)
+		cs.Logger.Infof("State changed from %s to %s", prevDigest,cs.state.header.BodyDigest)
 	}
 
-	// Always increment the header stats
-	if cs.state.header.RemainingRounds > 0 {
+	// Decrement the header stats if we have gathered enough reconstruction shares
+	if cs.state.header.RemainingRounds > 0 && len(cs.state.commitments) >= cs.threshold() {
+		cs.Logger.Infof("Remaining rounds: %d --> %d", cs.state.header.RemainingRounds, cs.state.header.RemainingRounds - 1)
 		cs.state.header.RemainingRounds--
 	}
 
@@ -175,7 +197,7 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 	receivedReconShares := len(input.ReconShares) > 0
 
 	// Is this the last round for this committee and we should send reconstruction shares?
-	if len(cs.state.commitments) == cs.threshold() && cs.state.header.RemainingRounds == 0 && !receivedReconShares {
+	if len(cs.state.commitments) >= cs.threshold() && cs.state.header.RemainingRounds == 0 && !receivedReconShares {
 		reconShares, err := cs.createReconShares()
 		if err != nil {
 			return feedback, nil, fmt.Errorf("failed creating reconstruction shares: %v", err)
@@ -184,18 +206,20 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 	}
 
 	if receivedReconShares {
+		cs.Logger.Infof("Received %d ReconShares", len(input.ReconShares))
 		combinedSecret, err := cs.secretFromReconShares(input.ReconShares)
 		if err != nil {
 			return feedback, state, err
 		}
 
-		feedback.NextCommittee = SelectCommittee(input.NextConfig, []byte(digest(combinedSecret)))
+		feedback.NextCommittee = cs.SelectCommittee(input.NextConfig, []byte(digest(combinedSecret)))
+		cs.Logger.Infof("Next committee will be %s", feedback.NextCommittee)
 	}
 	return feedback, state, nil
 
 }
 
-func SelectCommittee(config committee.Config, seed []byte) []uint32 {
+func SelectCommittee(config committee.Config, seed []byte) []int32 {
 	failureChance := big.NewRat(1, config.InverseFailureChance)
 	expectedCommitteeSize := CommitteeSize(int64(len(config.Nodes)), config.FailedTotalNodesPercentage, *failureChance)
 
@@ -203,8 +227,8 @@ func SelectCommittee(config committee.Config, seed []byte) []uint32 {
 	return ids.permute(seed).distinctPrefixOfSize(expectedCommitteeSize)
 }
 
-func mapToSlice(m map[uint32]struct{}) []uint32 {
-	var res []uint32
+func mapToSlice(m map[int32]struct{}) []int32 {
+	var res []int32
 	for k := range m {
 		res = append(res, k)
 	}
@@ -297,7 +321,7 @@ func (cs *CommitteeSelection) secretFromReconShares(reconShares []committee.Reco
 
 func reconstructSecrets(reconShares []committee.ReconShare) ([]kyber.Point, error) {
 	// Index2Share is a mapping from scalar evaluation point to the value of a share
-	committerId2SharesByIndex := make(map[uint32]Index2Share)
+	committerId2SharesByIndex := make(map[int32]Index2Share)
 	for _, reconShare := range reconShares {
 		m, exists := committerId2SharesByIndex[reconShare.About]
 		if !exists {
@@ -344,18 +368,22 @@ func (cs *CommitteeSelection) createReconShares() ([]committee.ReconShare, error
 		rs := committee.ReconShare{
 			Proof: proofBytes,
 			Data:  dBytes,
-			About: uint32(cmt.From), // The committer ID
+			About: int32(cmt.From), // The committer ID
 		}
+
+		cs.Logger.Infof("Creating ReconShare corresponding to the commitment of %d", cmt.From)
 
 		res = append(res, rs)
 	}
+
+	cs.Logger.Infof("Created %d ReconShares", len(res))
 
 	return res, nil
 }
 
 func (cs *CommitteeSelection) loadOurCommitment(commitments []Commitment) error {
 	for _, cmt := range commitments {
-		if cs.id == uint32(cmt.From) {
+		if cs.id == int32(cmt.From) {
 			cs.commitment = &Commitment{
 				From:        cmt.From,
 				Commitments: cmt.Commitments,
@@ -366,9 +394,11 @@ func (cs *CommitteeSelection) loadOurCommitment(commitments []Commitment) error 
 				return fmt.Errorf("failed serializing commitment to its raw form: %v", err)
 			}
 			cs.commitmentInRawForm = &rawCommitment
+			cs.Logger.Infof("Found our commitment among %d commitments", len(commitments))
 		}
 	}
 
+	cs.Logger.Infof("Our commitment wasn't found among %d commitments", len(commitments))
 	return nil
 }
 
@@ -392,6 +422,9 @@ func (cs *CommitteeSelection) prepareCommitment() error {
 
 	cs.commitment = &commitment
 	cs.commitmentInRawForm = &rawCommitment
+
+	cs.Logger.Infof("Prepared a commitment with %d commitments and %d encrypted shares",
+		len(commitment.Commitments), len(commitment.EncShares))
 
 	return nil
 }
@@ -429,6 +462,9 @@ type State struct {
 }
 
 func (s *State) Initialize(rawState []byte) error {
+	if len(rawState) == 0 {
+		return nil
+	}
 	bb := bytes.NewBuffer(rawState)
 	// Read header size
 	headerSizeBuff := make([]byte, 4)
@@ -480,6 +516,9 @@ func (s *State) Initialize(rawState []byte) error {
 }
 
 func (s *State) ToBytes() []byte {
+	if len(s.bodyBytes) == 0 {
+		return nil
+	}
 	bb := bytes.Buffer{}
 	headerBytes := s.header.Bytes()
 	headerLength := len(headerBytes)
@@ -501,7 +540,7 @@ func (s *State) loadCommitments(rawCommitments []committee.Commitment) error {
 	return err
 }
 
-func (cs *CommitteeSelection) locateEncryptedShares(committerID uint32, targetID int32) (e, pk kyber.Point, err error) {
+func (cs *CommitteeSelection) locateEncryptedShares(committerID int32, targetID int32) (e, pk kyber.Point, err error) {
 	// We search for the commitment in this committee according to the committer ID.
 	for _, cmt := range cs.state.commitments {
 		if cmt.From != int32(committerID) {
@@ -611,7 +650,7 @@ type Commitment struct {
 	Proofs      SerializedProofs
 }
 
-func (cmt Commitment) ToRawForm(from uint32) (committee.Commitment, error) {
+func (cmt Commitment) ToRawForm(from int32) (committee.Commitment, error) {
 	var z committee.Commitment
 
 	serializedCommitment := SerializedCommitment{}
@@ -675,17 +714,17 @@ func sha256Hash(bytes []byte) []byte {
 	return h.Sum(nil)
 }
 
-func weightedList(wl []committee.Weight) []uint32 {
+func weightedList(wl []committee.Weight) []int32 {
 	res := make(randomIntList, 0)
 	for _, weight := range wl {
 		for i := 0; i < int(weight.Weight); i++ {
-			res = append(res, uint32(weight.ID))
+			res = append(res, int32(weight.ID))
 		}
 	}
 	return res
 }
 
-type randomIntList []uint32
+type randomIntList []int32
 
 func (l randomIntList) permute(seed []byte) randomIntList {
 	if l == nil {
@@ -700,7 +739,7 @@ func (l randomIntList) permute(seed []byte) randomIntList {
 }
 
 func (l randomIntList) distinctPrefixOfSize(size int) randomIntList {
-	res := make(map[uint32]struct{})
+	res := make(map[int32]struct{})
 	for _, id := range l {
 		if len(res) == size {
 			break
@@ -711,7 +750,7 @@ func (l randomIntList) distinctPrefixOfSize(size int) randomIntList {
 }
 
 // Source2Points defines curve points indexed by their source
-type Source2Points map[uint32]kyber.Point
+type Source2Points map[int32]kyber.Point
 
 // SortedShares returns the points sorted by their sources
 func (c2s Source2Points) SortedPoints() []kyber.Point {
@@ -724,7 +763,7 @@ func (c2s Source2Points) SortedPoints() []kyber.Point {
 
 	var res []kyber.Point
 	for _, source := range sources {
-		p := c2s[uint32(source)]
+		p := c2s[int32(source)]
 		res = append(res, p)
 	}
 	return res
