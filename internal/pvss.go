@@ -72,6 +72,7 @@ func (pvss *PVSS) Commit(threshold int, pubKeys []kyber.Point) error {
 	return nil
 }
 
+// TODO: the paper uses a challenge that is a hash over all the instances, we need to align
 func (pvss PVSS) VerifyCommit(pubKeys []kyber.Point) error {
 	for i, pk := range pubKeys {
 		// Create commitment for evaluation of the polynomial from commitments on coefficients
