@@ -8,7 +8,6 @@ package cs
 import (
 	"encoding/asn1"
 	"fmt"
-	"math/big"
 
 	"go.dedis.ch/kyber/v3"
 	"go.dedis.ch/kyber/v3/share"
@@ -74,9 +73,12 @@ func (pvss *PVSS) Commit(threshold int, pubKeys []kyber.Point) error {
 
 // TODO: the paper uses a challenge that is a hash over all the instances, we need to align
 func (pvss PVSS) VerifyCommit(pubKeys []kyber.Point) error {
+	if len(pubKeys) != len(pvss.Proofs.Proofs) {
+		return fmt.Errorf("have %d public keys but %d proofs to verify", len(pubKeys), len(pvss.Proofs.Proofs))
+	}
 	for i, pk := range pubKeys {
 		// Create commitment for evaluation of the polynomial from commitments on coefficients
-		h1 := commitmentOnPolynomialEvaluation(big.NewInt(int64(i+1)), pvss.Commitments)
+		h1 := commitmentOnPolynomialEvaluation(int64(i+1), pvss.Commitments)
 		h2 := pvss.EncryptedEvaluations[i]
 
 		// Verify ZKP that the exponent of the encrypted share (h2) is the same as the combined commitment above (h1)
@@ -296,4 +298,26 @@ func (sss *SSS) LagrangeCoefficient(evaluatedAt int64, evaluationPoints ...int64
 	}
 
 	return prod
+}
+
+func Exp(x kyber.Scalar, exponent int) kyber.Scalar {
+	if exponent < 0 {
+		panic("negative exponentiation shouldn't be used in this scheme")
+	}
+
+	if exponent == 0 {
+		return suite.Scalar().One()
+	}
+
+	if exponent == 1 {
+		return x
+	}
+
+	squaredX := suite.Scalar().Mul(x, x)
+
+	if exponent%2 == 0 {
+		return Exp(squaredX, exponent/2)
+	}
+
+	return suite.Scalar().Mul(x, Exp(squaredX, (exponent-1)/2))
 }

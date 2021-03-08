@@ -19,19 +19,103 @@ import (
 func TestCommitteeSelection(t *testing.T) {
 	network := createNetwork(t, 7)
 
-	feedback, state, err := network[0].Process(&State{}, committee.Input{})
-	assert.NoError(t, err)
+	var emptyStates []committee.State
+	for i := 0; i < len(network); i++ {
+		emptyStates = append(emptyStates, &State{})
+	}
 
-	// Nothing changed yet since the first node hasn't sent messages to the rest
-	assert.Empty(t, state.ToBytes())
-	assert.Empty(t, feedback.ReconShares)
-	assert.NotNil(t, feedback.Commitment)
-	assert.Empty(t, feedback.NextCommittee)
+	a := network.Process(t, emptyStates, committee.Input{},
+		assertEqualState, func(t *testing.T, a []stateFeedback) {
+			// Nothing changed yet since the first node hasn't sent messages to the rest
+			for _, e := range a {
+				assert.Empty(t, e.s.ToBytes())
+				assert.Empty(t, e.f.ReconShares)
+				// Everyone has feedback
+				assert.NotNil(t, e.f.Commitment)
+				assert.Empty(t, e.f.NextCommittee)
+			}
+		})
 
-	network.Process(t, state, committee.Input{
-		ReconShares: feedback.ReconShares,
-		Commitments:[]committee.Commitment{*feedback.Commitment},
-	})
+	for i := 0; i <= ((len(network) - 1) / 3); i++ {
+		// Take the feedback of the 'i' node
+		c := a[i].f.Commitment
+		// And use it in the i-th round
+
+		// First verify it
+		for _, n := range network {
+			err := n.VerifyCommitment(*c)
+			assert.NoError(t, err)
+		}
+
+		a = network.Process(t, a.states(), committee.Input{
+			Commitments: []committee.Commitment{*c},
+		},
+			assertEqualState, func(t *testing.T, a []stateFeedback) {
+				for j, e := range a {
+					// We do not send ReconShares unless it is the last round
+					if i == ((len(network) - 1) / 3) {
+						assert.NotEmpty(t, t, e.f.ReconShares)
+					} else {
+						assert.Empty(t, e.f.ReconShares)
+					}
+
+					// Everyone has commitment feedback but the 'i' node
+					if j == i {
+						assert.Nil(t, e.f.Commitment)
+					} else {
+						assert.NotNil(t, e.f.Commitment)
+					}
+					assert.Empty(t, e.f.NextCommittee)
+				}
+			})
+	}
+
+	var reconShares []committee.ReconShare
+
+	for _, e := range a {
+		reconShares = append(reconShares, e.f.ReconShares...)
+	}
+
+	// Verify all ReconShares
+	for _, n := range network {
+		for _, rcs := range reconShares {
+			err := n.VerifyReconShare(rcs)
+			assert.NoError(t, err)
+		}
+	}
+
+	network.Process(t, a.states(), committee.Input{
+		ReconShares: reconShares,
+	},
+		assertEqualState, func(t *testing.T, a []stateFeedback) {
+			for _, e := range a {
+				assert.Empty(t, e.f.NextCommittee)
+			}
+		})
+
+}
+
+func assertEqualState(t *testing.T, a []stateFeedback) {
+	stateDigests := make(map[string]struct{})
+	for _, e := range a {
+		stateDigests[digest(e.s.ToBytes())] = struct{}{}
+	}
+	assert.Len(t, stateDigests, 1)
+}
+
+type stateFeedbacks []stateFeedback
+
+func (sfs stateFeedbacks) states() []committee.State {
+	var res []committee.State
+	for _, sf := range sfs {
+		res = append(res, sf.s)
+	}
+	return res
+}
+
+type stateFeedback struct {
+	s committee.State
+	f committee.Feedback
 }
 
 type node struct {
@@ -43,15 +127,19 @@ type node struct {
 
 type network []node
 
-func (net network) Process(t *testing.T, state committee.State, input committee.Input) []struct{committee.State; committee.Feedback}{
-	var res []struct{committee.State; committee.Feedback}
-	for _, n := range net {
-		f, s, err := n.Process(state, input)
+func (net network) Process(t *testing.T, states []committee.State, input committee.Input, preds ...func(t *testing.T, a []stateFeedback)) stateFeedbacks {
+	var res []stateFeedback
+
+	for i, n := range net {
+		f, s, err := n.Process(states[i], input)
 		assert.NoError(t, err)
-		res = append(res, struct{committee.State; committee.Feedback}{
-			s, f,
-		})
+		res = append(res, stateFeedback{s: s, f: f})
 	}
+
+	for _, pred := range preds {
+		pred(t, res)
+	}
+
 	return res
 }
 
@@ -60,7 +148,7 @@ func (net network) nodes() committee.Nodes {
 
 	for _, n := range net {
 		res = append(res, committee.Node{
-			ID:     int32(n.id),
+			ID:     n.id,
 			PubKey: n.pk,
 		})
 	}
