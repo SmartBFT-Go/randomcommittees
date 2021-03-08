@@ -11,13 +11,16 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
 	"math/rand"
 	"reflect"
 	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	committee "github.com/SmartBFT-Go/randomcommittees/pkg"
 	"go.dedis.ch/kyber/v3"
@@ -28,7 +31,7 @@ type CommitteeSelector func(config committee.Config, seed []byte) []int32
 
 type CommitteeSelection struct {
 	SelectCommittee CommitteeSelector
-	Logger committee.Logger
+	Logger          committee.Logger
 	// Configuration
 	id        int32
 	ourIndex  int
@@ -139,8 +142,11 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 		prevDigest := `""`
 		if cs.state != nil {
 			prevDigest = cs.state.header.BodyDigest
-		} else {}
-		cs.Logger.Infof("State changed: %s --> %s", prevDigest, newState.header.BodyDigest)
+		} else {
+		}
+		cs.Logger.Infof("State we got differs from the state we have, updating it: %s --> %s", prevDigest, newState.header.BodyDigest)
+		cs.Logger.Debugf("State we had: %s", cs.state)
+		cs.Logger.Debugf("State we got: %s", newState)
 		cs.state = newState
 	}
 
@@ -151,7 +157,7 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 		return committee.Feedback{}, nil, err
 	}
 
-	// Prepare a fresh commitment if we haven't found one in the current committee.
+	// Prepare a fresh commitment if we haven't found one in the current committee, or didn't prepare one earlier.
 	if cs.commitment == nil {
 		if err := cs.prepareCommitment(); err != nil {
 			return committee.Feedback{}, nil, err
@@ -163,20 +169,27 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 
 	var changed bool
 
-	// If we have any commitments sent, refine them
+	// If we have any commitments received, refine them
+	cs.Logger.Infof("Received %d commitments in input", len(input.Commitments))
 	newCommitments, err := refineCommitments(input.Commitments)
 	if err != nil {
 		return feedback, nil, fmt.Errorf("failed extracting raw commitments from input: %v", err)
 	}
 
 	if len(input.Commitments) > 0 {
-		cs.Logger.Infof("Received %d commitments and refined %d commitments", len(input.Commitments), newCommitments)
+		cs.Logger.Infof("Received %d commitments and refined %d commitments", len(input.Commitments), len(newCommitments))
 	}
 
 	for i := 0; i < len(newCommitments) && len(cs.state.commitments) < cs.threshold(); i++ {
+		cs.Logger.Debugf("Added commitment from %d to state", newCommitments[i].From)
 		changed = true
 		cs.state.commitments = append(cs.state.commitments, newCommitments[i])
 		cs.state.body.Commitments = append(cs.state.body.Commitments, input.Commitments[i])
+
+		// If we persisted a commitment from ourselves, do not send any commitment in the feedback.
+		if newCommitments[i].From == cs.id {
+			feedback.Commitment = nil
+		}
 	}
 
 	// We check if the state has changed during this invocation
@@ -184,17 +197,19 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 		cs.state.bodyBytes = cs.state.body.Bytes()
 		prevDigest := cs.state.header.BodyDigest
 		cs.state.header.BodyDigest = digest(cs.state.bodyBytes)
-		cs.Logger.Infof("State changed from %s to %s", prevDigest,cs.state.header.BodyDigest)
+		cs.Logger.Infof("State changed from %s to %s", prevDigest, cs.state.header.BodyDigest)
 	}
 
 	// Decrement the header stats if we have gathered enough reconstruction shares
 	if cs.state.header.RemainingRounds > 0 && len(cs.state.commitments) >= cs.threshold() {
-		cs.Logger.Infof("Remaining rounds: %d --> %d", cs.state.header.RemainingRounds, cs.state.header.RemainingRounds - 1)
+		cs.Logger.Infof("Remaining rounds: %d --> %d", cs.state.header.RemainingRounds, cs.state.header.RemainingRounds-1)
 		cs.state.header.RemainingRounds--
 	}
 
 	// Did we receive reconstruction shares?
 	receivedReconShares := len(input.ReconShares) > 0
+
+	cs.Logger.Debugf("State: %s", cs.state)
 
 	// Is this the last round for this committee and we should send reconstruction shares?
 	if len(cs.state.commitments) >= cs.threshold() && cs.state.header.RemainingRounds == 0 && !receivedReconShares {
@@ -206,7 +221,12 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 	}
 
 	if receivedReconShares {
-		cs.Logger.Infof("Received %d ReconShares", len(input.ReconShares))
+		inputBeforeDeduplication := input.ReconShares
+		input.ReconShares = deduplicateReconShares(input.ReconShares, cs.threshold())
+
+		cs.Logger.Infof("Received %d ReconShares and de-duplicated into %d ReconShares",
+			len(inputBeforeDeduplication), len(input.ReconShares))
+
 		combinedSecret, err := cs.secretFromReconShares(input.ReconShares)
 		if err != nil {
 			return feedback, state, err
@@ -216,7 +236,46 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 		cs.Logger.Infof("Next committee will be %s", feedback.NextCommittee)
 	}
 	return feedback, state, nil
+}
 
+func deduplicateReconShares(in []committee.ReconShare, threshold int) []committee.ReconShare {
+	sender2about := make(map[int32]map[int32]struct{})
+	for _, rcs := range in {
+		about, exists := sender2about[rcs.From]
+		if !exists {
+			about = make(map[int32]struct{})
+		}
+		about[rcs.About] = struct{}{}
+		sender2about[rcs.From] = about
+	}
+
+	// Remove mappings that have less than a threshold cardinality
+	for sender, about := range sender2about {
+		if len(about) < threshold {
+			delete(sender2about, sender)
+		}
+	}
+
+	// Remove mappings until we have exactly a threshold of cardinality
+	for len(sender2about) > threshold {
+		for sender := range sender2about {
+			delete(sender2about, sender)
+			break
+		}
+	}
+
+	// Fold everything into the result slice, filtering out
+	// ReconShares from nodes that didn't make the cut
+	var res []committee.ReconShare
+	for _, e := range in {
+		_, exists := sender2about[e.From]
+		if !exists {
+			continue
+		}
+		res = append(res, e)
+	}
+
+	return res
 }
 
 func SelectCommittee(config committee.Config, seed []byte) []int32 {
@@ -256,7 +315,13 @@ func (r *randomness) Seed(_ int64) {
 }
 
 func (cs *CommitteeSelection) VerifyCommitment(commitment committee.Commitment) error {
+	start := time.Now()
+	defer func() {
+		cs.Logger.Debugf("Commitment from %d took %s to verify", commitment.From, time.Since(start))
+	}()
+
 	cms, err := refineCommitments([]committee.Commitment{commitment})
+
 	if err != nil {
 		return fmt.Errorf("failed refining commitments: %v", err)
 	}
@@ -265,29 +330,47 @@ func (cs *CommitteeSelection) VerifyCommitment(commitment committee.Commitment) 
 		return fmt.Errorf("refining succeeded but got %d commitments instead of 1", len(cms))
 	}
 
-	for _, cmt := range cms {
-		pvss := PVSS{
-			Proofs:               cmt.Proofs,
-			EncryptedEvaluations: cmt.EncShares,
-			Commitments:          cmt.Commitments,
-		}
+	atomicErr := &atomic.Value{}
 
-		if err := pvss.VerifyCommit(cs.pubKeys); err != nil {
-			return fmt.Errorf("commit from %d isn't sound: %v", cmt.From, err)
-		}
+	var wg sync.WaitGroup
+	wg.Add(len(cms))
+
+	for _, cmt := range cms {
+		go func(cmt Commitment) {
+			defer wg.Done()
+
+			pvss := PVSS{
+				Proofs:               cmt.Proofs,
+				EncryptedEvaluations: cmt.EncShares,
+				Commitments:          cmt.Commitments,
+			}
+
+			if err := pvss.VerifyCommit(cs.pubKeys); err != nil {
+				atomicErr.Store(fmt.Errorf("commit from %d isn't sound: %v", cmt.From, err))
+			}
+		}(cmt)
 	}
 
-	return nil
+	wg.Wait()
+	if atomicErr.Load() == nil {
+		return nil
+	}
+
+	return atomicErr.Load().(error)
 }
 
 func (cs *CommitteeSelection) VerifyReconShare(share committee.ReconShare) error {
+	start := time.Now()
+	defer func() {
+		cs.Logger.Debugf("ReconShare from %d about %d took %s to verify", share.From, share.About, time.Since(start))
+	}()
 	d := suite.Point()
 	if err := d.UnmarshalBinary(share.Data); err != nil {
 		return fmt.Errorf("failed unmarshaling reconshare: %v", err)
 	}
 
 	// Locate the encrypted share
-	e, pk, err := cs.locateEncryptedShares(share.About, int32(share.From))
+	e, pk, err := cs.locateEncryptedShares(share.About, share.From)
 	if err != nil {
 		return err
 	}
@@ -366,9 +449,10 @@ func (cs *CommitteeSelection) createReconShares() ([]committee.ReconShare, error
 		}
 
 		rs := committee.ReconShare{
+			From:  cs.id,
 			Proof: proofBytes,
 			Data:  dBytes,
-			About: int32(cmt.From), // The committer ID
+			About: cmt.From, // The committer ID
 		}
 
 		cs.Logger.Infof("Creating ReconShare corresponding to the commitment of %d", cmt.From)
@@ -383,7 +467,7 @@ func (cs *CommitteeSelection) createReconShares() ([]committee.ReconShare, error
 
 func (cs *CommitteeSelection) loadOurCommitment(commitments []Commitment) error {
 	for _, cmt := range commitments {
-		if cs.id == int32(cmt.From) {
+		if cs.id == cmt.From {
 			cs.commitment = &Commitment{
 				From:        cmt.From,
 				Commitments: cmt.Commitments,
@@ -409,7 +493,7 @@ func (cs *CommitteeSelection) prepareCommitment() error {
 	}
 
 	commitment := Commitment{
-		From:        int32(cs.id),
+		From:        cs.id,
 		EncShares:   pvss.EncryptedEvaluations,
 		Commitments: pvss.Commitments,
 		Proofs:      pvss.Proofs,
@@ -437,11 +521,10 @@ func (cs *CommitteeSelection) threshold() int {
 	return t
 }
 
-func commitmentOnPolynomialEvaluation(i *big.Int, commitments []kyber.Point) kyber.Point {
+func commitmentOnPolynomialEvaluation(i int64, commitments []kyber.Point) kyber.Point {
 	var points []kyber.Point
 	for j, c := range commitments {
-		exp := big.NewInt(0).Exp(i, big.NewInt(int64(j)), nil)
-		e := suite.Scalar().SetInt64(exp.Int64())
+		e := Exp(suite.Scalar().SetInt64(i), j)
 		p := suite.Point().Mul(e, c)
 		points = append(points, p)
 	}
@@ -455,10 +538,24 @@ func commitmentOnPolynomialEvaluation(i *big.Int, commitments []kyber.Point) kyb
 }
 
 type State struct {
-	commitments []Commitment
+	commitments commitments
 	header      Header
 	body        Body
 	bodyBytes   []byte
+}
+
+func (s *State) String() string {
+	m := make(map[string]interface{})
+	m["commitments"] = s.commitments.asStrings()
+	m["header"] = fmt.Sprintf("RemainingRounds: %d, BodyDigest: %s", s.header.RemainingRounds, s.header.BodyDigest)
+	m["body"] = fmt.Sprintf("commitments: %d, reconshares: %d", len(s.body.Commitments), len(s.body.ReconShares))
+
+	str, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+
+	return string(str)
 }
 
 func (s *State) Initialize(rawState []byte) error {
@@ -540,20 +637,20 @@ func (s *State) loadCommitments(rawCommitments []committee.Commitment) error {
 	return err
 }
 
-func (cs *CommitteeSelection) locateEncryptedShares(committerID int32, targetID int32) (e, pk kyber.Point, err error) {
+func (cs *CommitteeSelection) locateEncryptedShares(committerID int32, decrypterID int32) (e, pk kyber.Point, err error) {
 	// We search for the commitment in this committee according to the committer ID.
 	for _, cmt := range cs.state.commitments {
-		if cmt.From != int32(committerID) {
+		if cmt.From != committerID {
 			continue
 		}
 		// Once we found the commitment, we need to search the appropriate encrypted share that
 		// the committer has encrypted under that target node's public key.
-		target, exists := cs.ids2Index[targetID]
+		decrypterIndex, exists := cs.ids2Index[decrypterID]
 		if !exists {
-			return nil, nil, fmt.Errorf("%d is not a valid ID", targetID)
+			return nil, nil, fmt.Errorf("%d is not a valid ID", decrypterID)
 		}
-		e = cmt.EncShares[target]
-		pk = cs.pubKeys[target]
+		e = cmt.EncShares[decrypterIndex]
+		pk = cs.pubKeys[decrypterIndex]
 		return
 	}
 	return nil, nil, fmt.Errorf("commitment of %d wasn't found", committerID)
@@ -573,8 +670,15 @@ func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, err
 
 	for _, cmt := range rawCommitments {
 		commitment := Commitment{
-			From: int32(cmt.From),
+			From: cmt.From,
 		}
+
+		sps := SerializedProofs{}
+		if err := sps.Initialize(cmt.Proof); err != nil {
+			return nil, fmt.Errorf("faile parsing proofs for %d: %v", cmt.From, err)
+		}
+
+		commitment.Proofs = sps
 
 		serCommitments := &SerializedCommitment{}
 		if err := serCommitments.FromBytes(cmt.Data); err != nil {
@@ -612,9 +716,8 @@ func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, err
 }
 
 type Header struct {
-	RemainingRounds      int32
-	CommitteeIncarnation int32
-	BodyDigest           string
+	RemainingRounds int32
+	BodyDigest      string
 }
 
 func (h Header) Bytes() []byte {
@@ -638,9 +741,15 @@ func (b Body) Bytes() []byte {
 	return bodyBytes
 }
 
-type ReconShare struct {
-	D    kyber.Point
-	From int64
+type commitments []Commitment
+
+func (cms commitments) asStrings() []string {
+	var res []string
+	for _, cmt := range cms {
+		res = append(res, fmt.Sprintf("from %d, %d commitments, %d shares, %d proofs",
+			cmt.From, len(cmt.Commitments), len(cmt.EncShares), len(cmt.Proofs.Proofs)))
+	}
+	return res
 }
 
 type Commitment struct {
@@ -705,7 +814,7 @@ func (scm *SerializedCommitment) FromBytes(bytes []byte) error {
 }
 
 func digest(bytes []byte) string {
-	return hex.EncodeToString(sha256Hash(bytes))
+	return base64.StdEncoding.EncodeToString(sha256Hash(bytes))
 }
 
 func sha256Hash(bytes []byte) []byte {

@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package cs
 
 import (
+	"math/rand"
 	"testing"
 
 	"go.dedis.ch/kyber/v3/share"
@@ -166,4 +167,16 @@ func TestCommitDecryptVerify(t *testing.T) {
 
 	err = VerifyDecShare(pk, d, e, proof)
 	assert.NoError(t, err)
+}
+
+func TestExp(t *testing.T) {
+	n := rand.Int63()
+	x := suite.Scalar().SetInt64(n)
+
+	x2 := suite.Scalar().Mul(x, x)
+	x3 := suite.Scalar().Mul(x2, suite.Scalar().SetInt64(n))
+
+	assert.True(t, x2.Equal(Exp(x, 2)))
+	assert.True(t, x3.Equal(Exp(x, 3)))
+
 }
