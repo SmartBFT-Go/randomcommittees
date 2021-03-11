@@ -58,6 +58,8 @@ func TestDLEQ(t *testing.T) {
 	dleq := DLEQ{
 		G1: g1,
 		G2: g2,
+		H1: h1,
+		H2: h2,
 	}
 
 	proof, err := dleq.Prove(scalar)
@@ -162,7 +164,7 @@ func TestCommitDecryptVerify(t *testing.T) {
 
 	e := pvss.EncryptedEvaluations[0]
 
-	d, proof, err := DecryptShare(sk, e)
+	d, proof, err := DecryptShare(pk, sk, e)
 	assert.NoError(t, err)
 
 	err = VerifyDecShare(pk, d, e, proof)

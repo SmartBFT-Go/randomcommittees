@@ -16,8 +16,12 @@ import (
 	"go.uber.org/zap"
 )
 
+func init() {
+	mathrand.Seed(time.Now().Unix())
+}
+
 func TestCommitteeSelection(t *testing.T) {
-	network := createNetwork(t, 7)
+	network := createNetwork(t, 11)
 
 	var emptyStates []committee.State
 	for i := 0; i < len(network); i++ {
@@ -36,7 +40,13 @@ func TestCommitteeSelection(t *testing.T) {
 			}
 		})
 
+	var sharedState []byte
+
 	for i := 0; i <= ((len(network) - 1) / 3); i++ {
+		// Initialize the state of some parties from the previous state,
+		// to simulate a crash and recovery
+		network.MaybeRestart(t, sharedState, a[i].s)
+
 		// Take the feedback of the 'i' node
 		c := a[i].f.Commitment
 		// And use it in the i-th round
@@ -141,6 +151,23 @@ func (net network) Process(t *testing.T, states []committee.State, input committ
 	}
 
 	return res
+}
+
+func (net network) MaybeRestart(t *testing.T, state []byte, s committee.State) {
+	for _, n := range net {
+		if mathrand.Int()%2 == 0 {
+			continue
+		}
+		n.CommitteeSelection = &CommitteeSelection{
+			Logger:          n.CommitteeSelection.Logger,
+			SelectCommittee: n.CommitteeSelection.SelectCommittee,
+		}
+		assert.NoError(t, n.Initialize(n.id, n.sk, net.nodes()))
+		// Wipe out the existing state
+		assert.NoError(t, s.Initialize(nil))
+		// Recover it
+		assert.NoError(t, s.Initialize(state))
+	}
 }
 
 func (net network) nodes() committee.Nodes {
