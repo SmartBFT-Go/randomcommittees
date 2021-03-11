@@ -18,8 +18,6 @@ import (
 	"math/rand"
 	"reflect"
 	"sort"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	committee "github.com/SmartBFT-Go/randomcommittees/pkg"
@@ -330,33 +328,19 @@ func (cs *CommitteeSelection) VerifyCommitment(commitment committee.Commitment) 
 		return fmt.Errorf("refining succeeded but got %d commitments instead of 1", len(cms))
 	}
 
-	atomicErr := &atomic.Value{}
+	cmt := cms[0]
 
-	var wg sync.WaitGroup
-	wg.Add(len(cms))
-
-	for _, cmt := range cms {
-		go func(cmt Commitment) {
-			defer wg.Done()
-
-			pvss := PVSS{
-				Proofs:               cmt.Proofs,
-				EncryptedEvaluations: cmt.EncShares,
-				Commitments:          cmt.Commitments,
-			}
-
-			if err := pvss.VerifyCommit(cs.pubKeys); err != nil {
-				atomicErr.Store(fmt.Errorf("commit from %d isn't sound: %v", cmt.From, err))
-			}
-		}(cmt)
+	pvss := PVSS{
+		Proofs:               cmt.Proofs,
+		EncryptedEvaluations: cmt.EncShares,
+		Commitments:          cmt.Commitments,
 	}
 
-	wg.Wait()
-	if atomicErr.Load() == nil {
-		return nil
+	if err := pvss.VerifyCommit(cs.pubKeys); err != nil {
+		return fmt.Errorf("commit from %d isn't sound: %v", cmt.From, err)
 	}
 
-	return atomicErr.Load().(error)
+	return nil
 }
 
 func (cs *CommitteeSelection) VerifyReconShare(share committee.ReconShare) error {
@@ -433,7 +417,7 @@ func (cs *CommitteeSelection) createReconShares() ([]committee.ReconShare, error
 	var res []committee.ReconShare
 	for _, cmt := range cs.state.commitments {
 		ourShare := cmt.EncShares[cs.ourIndex]
-		d, proof, err := DecryptShare(cs.sk, ourShare)
+		d, proof, err := DecryptShare(cs.pk, cs.sk, ourShare)
 		if err != nil {
 			return nil, fmt.Errorf("failed decrypting our share: %v", err)
 		}
@@ -560,6 +544,8 @@ func (s *State) String() string {
 
 func (s *State) Initialize(rawState []byte) error {
 	if len(rawState) == 0 {
+		// Reset all state
+		*s = State{}
 		return nil
 	}
 	bb := bytes.NewBuffer(rawState)
