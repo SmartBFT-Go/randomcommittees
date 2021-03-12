@@ -7,12 +7,15 @@ package cs
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	mathrand "math/rand"
 	"testing"
 	"time"
 
 	committee "github.com/SmartBFT-Go/randomcommittees/pkg"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"go.uber.org/zap"
 )
 
@@ -40,12 +43,10 @@ func TestCommitteeSelection(t *testing.T) {
 			}
 		})
 
-	var sharedState []byte
-
 	for i := 0; i <= ((len(network) - 1) / 3); i++ {
 		// Initialize the state of some parties from the previous state,
 		// to simulate a crash and recovery
-		network.MaybeRestart(t, sharedState, a[i].s)
+		network.MaybeRestart(t, a[mathrand.Int()%len(network)].s.ToBytes(), a[i].s)
 
 		// Take the feedback of the 'i' node
 		c := a[i].f.Commitment
@@ -106,11 +107,11 @@ func TestCommitteeSelection(t *testing.T) {
 }
 
 func assertEqualState(t *testing.T, a []stateFeedback) {
-	stateDigests := make(map[string]struct{})
+	states := make(map[string]*State)
 	for _, e := range a {
-		stateDigests[digest(e.s.ToBytes())] = struct{}{}
+		states[base64.StdEncoding.EncodeToString(e.s.ToBytes())] = e.s.(*State)
 	}
-	assert.Len(t, stateDigests, 1)
+	require.Len(t, states, 1)
 }
 
 type stateFeedbacks []stateFeedback
@@ -162,6 +163,7 @@ func (net network) MaybeRestart(t *testing.T, state []byte, s committee.State) {
 			Logger:          n.CommitteeSelection.Logger,
 			SelectCommittee: n.CommitteeSelection.SelectCommittee,
 		}
+		n.CommitteeSelection.Logger.Infof("Restarting")
 		assert.NoError(t, n.Initialize(n.id, n.sk, net.nodes()))
 		// Wipe out the existing state
 		assert.NoError(t, s.Initialize(nil))
