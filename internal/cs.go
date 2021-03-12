@@ -169,7 +169,7 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 
 	// If we have any commitments received, refine them
 	cs.Logger.Infof("Received %d commitments in input", len(input.Commitments))
-	newCommitments, err := refineCommitments(input.Commitments)
+	newCommitments, err := refineCommitments(input.Commitments, false)
 	if err != nil {
 		return feedback, nil, fmt.Errorf("failed extracting raw commitments from input: %v", err)
 	}
@@ -318,7 +318,7 @@ func (cs *CommitteeSelection) VerifyCommitment(commitment committee.Commitment) 
 		cs.Logger.Debugf("Commitment from %d took %s to verify", commitment.From, time.Since(start))
 	}()
 
-	cms, err := refineCommitments([]committee.Commitment{commitment})
+	cms, err := refineCommitments([]committee.Commitment{commitment}, true)
 
 	if err != nil {
 		return fmt.Errorf("failed refining commitments: %v", err)
@@ -621,7 +621,7 @@ func (s *State) loadCommitments(rawCommitments []committee.Commitment) error {
 
 	s.body.Commitments = rawCommitments
 	s.commitments = nil
-	s.commitments, err = refineCommitments(rawCommitments)
+	s.commitments, err = refineCommitments(rawCommitments, false)
 
 	return err
 }
@@ -654,7 +654,7 @@ func refineReconShare(rawEncShare []byte) (kyber.Point, error) {
 	return p, nil
 }
 
-func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, error) {
+func refineCommitments(rawCommitments []committee.Commitment, loadProofs bool) ([]Commitment, error) {
 	var result []Commitment
 
 	for _, cmt := range rawCommitments {
@@ -662,12 +662,14 @@ func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, err
 			From: cmt.From,
 		}
 
-		sps := SerializedProofs{}
-		if err := sps.Initialize(cmt.Proof); err != nil {
-			return nil, fmt.Errorf("failed parsing proofs for %d: %v", cmt.From, err)
-		}
+		if loadProofs {
+			sps := SerializedProofs{}
+			if err := sps.Initialize(cmt.Proof); err != nil {
+				return nil, fmt.Errorf("failed parsing proofs for %d: %v", cmt.From, err)
+			}
 
-		commitment.Proofs = sps
+			commitment.Proofs = sps
+		}
 
 		serCommitments := &SerializedCommitment{}
 		if err := serCommitments.FromBytes(cmt.Data); err != nil {
