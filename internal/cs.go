@@ -543,11 +543,13 @@ func (s *State) String() string {
 }
 
 func (s *State) Initialize(rawState []byte) error {
+	// Reset all state first
+	*s = State{}
+
 	if len(rawState) == 0 {
-		// Reset all state
-		*s = State{}
 		return nil
 	}
+
 	bb := bytes.NewBuffer(rawState)
 	// Read header size
 	headerSizeBuff := make([]byte, 4)
@@ -569,7 +571,7 @@ func (s *State) Initialize(rawState []byte) error {
 		return fmt.Errorf("failed reading header from raw state (%s): %v", stateAsString, err)
 	}
 
-	s.header = *header
+	s.header.RemainingRounds = header.RemainingRounds
 
 	// If the digest of our previous state is equal to the digest of the next state,
 	// then no need to process the body as the result would not change.
@@ -577,9 +579,10 @@ func (s *State) Initialize(rawState []byte) error {
 		return nil
 	}
 
+	s.header = *header
+
 	// The rest of the bytes are for the body
-	remainingLength := len(rawState) - (headerSize + 4)
-	bodyBuff := rawState[remainingLength:]
+	bodyBuff := rawState[headerSize+4:]
 
 	body := &Body{}
 	if _, err := asn1.Unmarshal(bodyBuff, body); err != nil {
@@ -661,7 +664,7 @@ func refineCommitments(rawCommitments []committee.Commitment) ([]Commitment, err
 
 		sps := SerializedProofs{}
 		if err := sps.Initialize(cmt.Proof); err != nil {
-			return nil, fmt.Errorf("faile parsing proofs for %d: %v", cmt.From, err)
+			return nil, fmt.Errorf("failed parsing proofs for %d: %v", cmt.From, err)
 		}
 
 		commitment.Proofs = sps
@@ -813,7 +816,7 @@ func weightedList(wl []committee.Weight) []int32 {
 	res := make(randomIntList, 0)
 	for _, weight := range wl {
 		for i := 0; i < int(weight.Weight); i++ {
-			res = append(res, int32(weight.ID))
+			res = append(res, weight.ID)
 		}
 	}
 	return res
