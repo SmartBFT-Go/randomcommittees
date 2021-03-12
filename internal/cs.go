@@ -723,10 +723,23 @@ type Body struct {
 }
 
 func (b Body) Bytes() []byte {
-	bodyBytes, err := asn1.Marshal(b)
+	bodyToSerialize := Body{}
+	for _, cmt := range b.Commitments {
+		bodyToSerialize.Commitments = append(bodyToSerialize.Commitments, committee.Commitment{
+			Data: cmt.Data,
+			From: cmt.From,
+		})
+	}
+
+	for _, reconShare := range b.ReconShares {
+		bodyToSerialize.ReconShares = append(bodyToSerialize.ReconShares, reconShare)
+	}
+
+	bodyBytes, err := asn1.Marshal(bodyToSerialize)
 	if err != nil {
 		panic(err)
 	}
+
 	return bodyBytes
 }
 
