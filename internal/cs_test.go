@@ -8,6 +8,7 @@ package cs
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	mathrand "math/rand"
 	"testing"
 	"time"
@@ -97,12 +98,25 @@ func TestCommitteeSelection(t *testing.T) {
 
 	network.Process(t, a.states(), committee.Input{
 		ReconShares: reconShares,
+		NextConfig: committee.Config{
+			InverseFailureChance:       100,
+			FailedTotalNodesPercentage: 5,
+			Nodes: committee.Nodes{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}, {ID: 5}, {ID: 6},
+				{ID: 7}, {ID: 8}, {ID: 9}, {ID: 10}, {ID: 11}},
+		},
 	},
 		assertEqualState, func(t *testing.T, a []stateFeedback) {
 			for _, e := range a {
-				assert.Empty(t, e.f.NextCommittee)
+				assert.Equal(t, []int32{1, 2, 3, 4}, e.f.NextCommittee)
 			}
 		})
+
+	seeds := make(map[string]struct{})
+	for _, n := range network {
+		seeds[hex.EncodeToString(n.latestSeed)] = struct{}{}
+	}
+
+	assert.Len(t, seeds, 1)
 
 }
 
@@ -131,9 +145,10 @@ type stateFeedback struct {
 
 type node struct {
 	*CommitteeSelection
-	id int32
-	pk []byte
-	sk []byte
+	id         int32
+	pk         []byte
+	sk         []byte
+	latestSeed []byte
 }
 
 type network []node
@@ -200,15 +215,21 @@ func createNetwork(t *testing.T, size int) network {
 		logger, _ := logConfig.Build()
 		logger = logger.With(zap.String("t", t.Name())).With(zap.Int64("id", int64(id)))
 
+		latestSeed := make([]byte, 32)
+
 		cs := &CommitteeSelection{
-			SelectCommittee: simpleCommitteeSelector,
-			Logger:          logger.Sugar(),
+			SelectCommittee: func(_ committee.Config, seed []byte) []int32 {
+				copy(latestSeed, seed)
+				return []int32{1, 2, 3, 4}
+			},
+			Logger: logger.Sugar(),
 		}
 
 		pk, sk, err := cs.GenerateKeyPair(rand.Reader)
 		assert.NoError(t, err)
 
 		net = append(net, node{
+			latestSeed:         latestSeed,
 			CommitteeSelection: cs,
 			id:                 id,
 			pk:                 pk,
@@ -221,10 +242,6 @@ func createNetwork(t *testing.T, size int) network {
 	}
 
 	return net
-}
-
-func simpleCommitteeSelector(config committee.Config, seed []byte) []int32 {
-	return nil
 }
 
 type idGenerator map[int32]struct{}

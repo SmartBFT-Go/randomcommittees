@@ -198,19 +198,13 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 		cs.Logger.Infof("State changed from %s to %s", prevDigest, cs.state.header.BodyDigest)
 	}
 
-	// Decrement the header stats if we have gathered enough reconstruction shares
-	if cs.state.header.RemainingRounds > 0 && len(cs.state.commitments) >= cs.threshold() {
-		cs.Logger.Infof("Remaining rounds: %d --> %d", cs.state.header.RemainingRounds, cs.state.header.RemainingRounds-1)
-		cs.state.header.RemainingRounds--
-	}
-
 	// Did we receive reconstruction shares?
 	receivedReconShares := len(input.ReconShares) > 0
 
 	cs.Logger.Debugf("State: %s", cs.state)
 
 	// Is this the last round for this committee and we should send reconstruction shares?
-	if len(cs.state.commitments) >= cs.threshold() && cs.state.header.RemainingRounds == 0 && !receivedReconShares {
+	if len(cs.state.commitments) >= cs.threshold() && !receivedReconShares {
 		reconShares, err := cs.createReconShares()
 		if err != nil {
 			return feedback, nil, fmt.Errorf("failed creating reconstruction shares: %v", err)
@@ -368,7 +362,7 @@ func (cs *CommitteeSelection) VerifyReconShare(share committee.ReconShare) error
 }
 
 func (cs *CommitteeSelection) secretFromReconShares(reconShares []committee.ReconShare) ([]byte, error) {
-	reconstructedSecrets, err := reconstructSecrets(reconShares)
+	reconstructedSecrets, err := reconstructSecrets(reconShares, cs.ids2Index)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +380,7 @@ func (cs *CommitteeSelection) secretFromReconShares(reconShares []committee.Reco
 	return bb.Bytes(), nil
 }
 
-func reconstructSecrets(reconShares []committee.ReconShare) ([]kyber.Point, error) {
+func reconstructSecrets(reconShares []committee.ReconShare, ids2Index map[int32]int) ([]kyber.Point, error) {
 	// Index2Share is a mapping from scalar evaluation point to the value of a share
 	committerId2SharesByIndex := make(map[int32]Index2Share)
 	for _, reconShare := range reconShares {
@@ -401,7 +395,13 @@ func reconstructSecrets(reconShares []committee.ReconShare) ([]kyber.Point, erro
 			return nil, fmt.Errorf("failed processing decryption share of %d: %v", reconShare.About, err)
 		}
 
-		m[int64(reconShare.From)] = decShare
+		evalPoint, exists := ids2Index[reconShare.From]
+
+		if !exists {
+			return nil, fmt.Errorf("node %d doesn't exist", reconShare.From)
+		}
+
+		m[int64(evalPoint)] = decShare
 	}
 
 	committerIds2ReconstructedSecrets := make(Source2Points)
@@ -531,7 +531,7 @@ type State struct {
 func (s *State) String() string {
 	m := make(map[string]interface{})
 	m["commitments"] = s.commitments.asStrings()
-	m["header"] = fmt.Sprintf("RemainingRounds: %d, BodyDigest: %s", s.header.RemainingRounds, s.header.BodyDigest)
+	m["header"] = fmt.Sprintf("BodyDigest: %s", s.header.BodyDigest)
 	m["body"] = fmt.Sprintf("commitments: %d, reconshares: %d", len(s.body.Commitments), len(s.body.ReconShares))
 
 	str, err := json.Marshal(m)
@@ -570,8 +570,6 @@ func (s *State) Initialize(rawState []byte) error {
 		stateAsString := base64.StdEncoding.EncodeToString(rawState)
 		return fmt.Errorf("failed reading header from raw state (%s): %v", stateAsString, err)
 	}
-
-	s.header.RemainingRounds = header.RemainingRounds
 
 	// If the digest of our previous state is equal to the digest of the next state,
 	// then no need to process the body as the result would not change.
@@ -707,8 +705,7 @@ func refineCommitments(rawCommitments []committee.Commitment, loadProofs bool) (
 }
 
 type Header struct {
-	RemainingRounds int32
-	BodyDigest      string
+	BodyDigest string
 }
 
 func (h Header) Bytes() []byte {
