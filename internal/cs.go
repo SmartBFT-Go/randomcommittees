@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
 	"math/rand"
 	"reflect"
 	"sort"
@@ -270,20 +269,14 @@ func deduplicateReconShares(in []committee.ReconShare, threshold int) []committe
 	return res
 }
 
-func SelectCommittee(config committee.Config, seed []byte) []int32 {
-	failureChance := big.NewRat(1, config.InverseFailureChance)
-	expectedCommitteeSize := CommitteeSize(int64(len(config.Nodes)), config.FailedTotalNodesPercentage, *failureChance)
+func SelectCommittee(config committee.Config, seed []byte, size int) []int32 {
+	r := rand.New(&randomness{seed: seed})
+	rangeMapping := rangeMappingFromWeights(config.EffectiveWeights(), r)
 
-	ids := randomIntList(weightedList(config.Weights))
-	return ids.permute(seed).distinctPrefixOfSize(expectedCommitteeSize)
-}
-
-func mapToSlice(m map[int32]struct{}) []int32 {
-	var res []int32
-	for k := range m {
-		res = append(res, k)
-	}
-	return res
+	ids := randomIntList(config.Nodes.IDs())
+	return ids.permute(rangeMapping).
+		dePrioritize(config.ExcludedNodes).
+		prioritize(config.MandatoryNodes)[:size]
 }
 
 type randomness struct {
@@ -299,7 +292,11 @@ func (r *randomness) Int63() int64 {
 	defer func() {
 		r.state = r.state[8:]
 	}()
-	return int64(binary.BigEndian.Uint64(r.state[:8]))
+	n := int64(binary.BigEndian.Uint64(r.state[:8]))
+	if n < 0 {
+		n *= -1
+	}
+	return n
 }
 
 func (r *randomness) Seed(_ int64) {
@@ -824,39 +821,59 @@ func sha256Hash(bytes []byte) []byte {
 	return h.Sum(nil)
 }
 
-func weightedList(wl []committee.Weight) []int32 {
-	res := make(randomIntList, 0)
-	for _, weight := range wl {
-		for i := 0; i < int(weight.Weight); i++ {
-			res = append(res, weight.ID)
+type randomIntList []int32
+
+func (l randomIntList) toSet() map[int32]struct{} {
+	m := make(map[int32]struct{})
+	for _, n := range l {
+		m[n] = struct{}{}
+	}
+
+	return m
+}
+
+func (l randomIntList) without(list randomIntList) randomIntList {
+	var res randomIntList
+	s := list.toSet()
+	for _, n := range l {
+		if _, exists := s[n]; exists {
+			continue
 		}
+		res = append(res, n)
 	}
 	return res
 }
 
-type randomIntList []int32
+func (l randomIntList) permute(rm *rangeMapping) randomIntList {
+	m := make(map[int32]struct{})
 
-func (l randomIntList) permute(seed []byte) randomIntList {
-	if l == nil {
-		return nil
+	var res randomIntList
+	for len(res) < len(l) {
+
+		n := rm.randomSample()
+		if _, exists := m[n]; exists {
+			continue
+		}
+		m[n] = struct{}{}
+		res = append(res, n)
+		rm.remove(n)
 	}
-	var permutedIDs randomIntList
-	r := rand.New(&randomness{seed: seed})
-	for _, index := range r.Perm(len(l)) {
-		permutedIDs = append(permutedIDs, l[index])
-	}
-	return permutedIDs
+
+	return res
 }
 
-func (l randomIntList) distinctPrefixOfSize(size int) randomIntList {
-	res := make(map[int32]struct{})
-	for _, id := range l {
-		if len(res) == size {
-			break
-		}
-		res[id] = struct{}{}
-	}
-	return mapToSlice(res)
+func (l randomIntList) prioritize(prioritized randomIntList) randomIntList {
+	var res randomIntList
+	res = append(res, prioritized...)
+	res = append(res, l.without(prioritized)...)
+	return res
+}
+
+func (l randomIntList) dePrioritize(dePrioritized randomIntList) randomIntList {
+	var res randomIntList
+	res = append(res, l.without(dePrioritized)...)
+	res = append(res, dePrioritized...)
+	return res
 }
 
 // Source2Points defines curve points indexed by their source
@@ -877,4 +894,70 @@ func (c2s Source2Points) SortedPoints() []kyber.Point {
 		res = append(res, p)
 	}
 	return res
+}
+
+func rangeMappingFromWeights(weights []committee.Weight, r *rand.Rand) *rangeMapping {
+	var totalWeight int64
+	for _, w := range weights {
+		totalWeight += int64(w.Weight)
+	}
+
+	res := &rangeMapping{
+		r:       r,
+		m:       rangePairsFromWeights(weights, make(map[int32]struct{})),
+		total:   totalWeight,
+		weights: weights,
+		removed: make(map[int32]struct{}),
+	}
+	return res
+}
+
+func rangePairsFromWeights(weights []committee.Weight, removed map[int32]struct{}) map[int32]rangePair {
+	m := make(map[int32]rangePair)
+
+	var cumulativeWeights int64
+	for _, w := range weights {
+		if _, exists := removed[w.ID]; exists {
+			continue
+		}
+		m[w.ID] = rangePair{
+			weight: w.Weight,
+			a:      cumulativeWeights,
+			b:      cumulativeWeights + int64(w.Weight),
+		}
+		cumulativeWeights += int64(w.Weight)
+	}
+
+	return m
+}
+
+type rangeMapping struct {
+	total   int64
+	r       *rand.Rand
+	m       map[int32]rangePair
+	removed map[int32]struct{}
+	weights []committee.Weight
+}
+
+type rangePair struct {
+	a, b   int64
+	weight int32
+}
+
+func (rm *rangeMapping) randomSample() int32 {
+	sample := int64(rm.r.Intn(int(rm.total)))
+	for id, ab := range rm.m {
+		if sample >= ab.a && sample < ab.b {
+			return id
+		}
+	}
+
+	panic(fmt.Sprintf("%d is not within [0, %d)", sample, rm.total))
+}
+
+func (rm *rangeMapping) remove(n int32) {
+	rm.removed[n] = struct{}{}
+	w := rm.m[n].weight
+	rm.total -= int64(w)
+	rm.m = rangePairsFromWeights(rm.weights, rm.removed)
 }
