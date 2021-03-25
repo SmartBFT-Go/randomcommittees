@@ -19,15 +19,15 @@ type PrivateKey []byte
 type Commitment struct {
 	Data  []byte // Data should be persisted for future initialization
 	Proof []byte // Proof denotes the proof the data was honestly computed
-	From  int32 // From who this commitment was sent
+	From  int32  // From who this commitment was sent
 }
 
 // ReconShare represents a share for reconstructing the randomness of a node
 type ReconShare struct {
 	Data  []byte // Data should be persisted for future initialization
 	Proof []byte // Proof denotes the proof the data was honestly computed
-	About int32 // About denotes whose randomness are we reconstructing
-	From  int32 // Who sent this ReconShare
+	About int32  // About denotes whose randomness are we reconstructing
+	From  int32  // Who sent this ReconShare
 }
 
 // Config is the configuration of a committee
@@ -56,6 +56,33 @@ type Config struct {
 	// Weights denote relative multipliers for each node's chance
 	// to be selected into a committee.
 	Weights []Weight
+}
+
+func (config Config) EffectiveWeights() []Weight {
+	// Sanitize weights by removing duplicates
+	m := make(map[int32]int32)
+	for _, w := range config.Weights {
+		m[w.ID] = w.Weight
+	}
+
+	// Ensure all other nodes have at least weight of 1
+	for _, n := range config.Nodes {
+		_, exists := m[n.ID]
+		if !exists {
+			m[n.ID] = 1
+		}
+	}
+
+	// Finally, return the weights in the order they appear in the config.
+
+	var res []Weight
+	for _, n := range config.Nodes {
+		res = append(res, Weight{
+			ID:     n.ID,
+			Weight: m[n.ID],
+		})
+	}
+	return res
 }
 
 func (config *Config) Unmarshal(bytes []byte) error {
@@ -136,5 +163,5 @@ type Input struct {
 type Feedback struct {
 	Commitment    *Commitment  // Commitment to broadcast, if applicable
 	ReconShares   []ReconShare // ReconShares to broadcast, if applicable
-	NextCommittee []int32     // The next committee, if applicable. It may be equal to the current committee
+	NextCommittee []int32      // The next committee, if applicable. It may be equal to the current committee
 }

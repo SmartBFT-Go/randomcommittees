@@ -26,7 +26,6 @@ type Selection interface {
 	VerifyReconShare(ReconShare) error
 }
 
-
 // Logger defines the contract for logging.
 type Logger interface {
 	Debugf(template string, args ...interface{})

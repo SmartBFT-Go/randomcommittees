@@ -3,25 +3,123 @@ Copyright IBM Corp. All Rights Reserved.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package cs
+package cs_test
 
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	mathrand "math/rand"
+	"reflect"
 	"testing"
 	"time"
 
+	cs "github.com/SmartBFT-Go/randomcommittees"
+	. "github.com/SmartBFT-Go/randomcommittees/internal"
 	committee "github.com/SmartBFT-Go/randomcommittees/pkg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
 	"go.uber.org/zap"
 )
 
 func init() {
 	mathrand.Seed(time.Now().Unix())
+}
+
+func TestNewCommitteeSelection(t *testing.T) {
+	logConfig := zap.NewDevelopmentConfig()
+	logger, _ := logConfig.Build()
+	cs.NewCommitteeSelection(logger.Sugar())
+}
+
+func TestSelectCommittee(t *testing.T) {
+	randomSeed := make([]byte, 8)
+	binary.BigEndian.PutUint64(randomSeed, uint64(time.Now().Unix()))
+
+	t.Log("Random seed:", hex.EncodeToString(randomSeed))
+
+	type args struct {
+		config committee.Config
+		seed   []byte
+		size   int
+	}
+	tests := []struct {
+		name string
+		args args
+		want []int32
+	}{
+		{
+			name: "10 out of 10",
+			args: args{
+				seed: []byte{1, 2, 3, 4, 5},
+				config: committee.Config{
+					Nodes: nodes(10),
+				},
+				size: 10,
+			},
+			want: []int32{5, 0, 2, 1, 7, 4, 3, 9, 8, 6},
+		},
+		{
+			name: "No weight supplied means uniform",
+			args: args{
+				seed: []byte{1, 2, 3, 4, 5},
+				config: committee.Config{
+					Nodes: nodes(100),
+				},
+				size: 10,
+			},
+			want: []int32{45, 55, 57, 13, 73, 6, 74, 47, 37, 5},
+		},
+		{
+			name: "Honor weights",
+			args: args{
+				seed: []byte{1, 2, 3, 4, 5},
+				config: committee.Config{
+					Nodes: nodes(100),
+					Weights: []committee.Weight{
+						{
+							ID:     1,
+							Weight: 1 << 30,
+						},
+					},
+				},
+				size: 10,
+			},
+			want: []int32{1, 51, 99, 26, 0, 83, 19, 82, 55, 67},
+		},
+		{
+			name: "Honor mandatory",
+			args: args{
+				seed: randomSeed,
+				config: committee.Config{
+					Nodes:          nodes(100),
+					MandatoryNodes: []int32{10, 9, 8, 7, 6, 5, 4, 3, 2, 1},
+				},
+				size: 10,
+			},
+			want: []int32{10, 9, 8, 7, 6, 5, 4, 3, 2, 1},
+		},
+		{
+			name: "Honor excluded",
+			args: args{
+				seed: []byte{0, 0, 0, 0, 96, 92, 229, 72},
+				config: committee.Config{
+					Nodes:         nodes(10),
+					ExcludedNodes: []int32{0, 1, 2, 3, 4, 5, 6},
+				},
+				size: 3,
+			},
+			want: []int32{7, 8, 9},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SelectCommittee(tt.args.config, tt.args.seed, tt.args.size); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("SelectCommittee() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestCommitteeSelection(t *testing.T) {
@@ -256,4 +354,15 @@ func (ig idGenerator) generateID() int32 {
 		ig[int32(n)] = struct{}{}
 		return int32(n)
 	}
+}
+
+func nodes(n int) committee.Nodes {
+	var res committee.Nodes
+	for i := 0; i < n; i++ {
+		res = append(res, committee.Node{
+			ID:     int32(i),
+			PubKey: []byte{byte(i)},
+		})
+	}
+	return res
 }
