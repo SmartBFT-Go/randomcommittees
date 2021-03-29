@@ -8,13 +8,17 @@ package cs_test
 import (
 	"testing"
 
+	"go.uber.org/zap"
+
 	cs "github.com/SmartBFT-Go/randomcommittees"
 	committee "github.com/SmartBFT-Go/randomcommittees/pkg"
 )
 
 func TestNewCommitteeSelection(t *testing.T) {
+	logConfig := zap.NewDevelopmentConfig()
+	logger, _ := logConfig.Build()
 	// Check that the implementation correctly implements the interface
 	var myCommitteeSelection committee.Selection
-	myCommitteeSelection = cs.NewCommitteeSelection(nil)
+	myCommitteeSelection = cs.NewCommitteeSelection(logger.Sugar())
 	_ = myCommitteeSelection
 }
