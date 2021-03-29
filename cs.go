@@ -22,3 +22,8 @@ func NewCommitteeSelection(logger committee.Logger) *cs.CommitteeSelection {
 		Logger: logger,
 	}
 }
+
+func StateFromBytes(b []byte) (*cs.State, error) {
+	s := &cs.State{}
+	return s, s.Initialize(b)
+}

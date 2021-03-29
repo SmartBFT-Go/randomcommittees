@@ -8,6 +8,8 @@ package cs_test
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"go.uber.org/zap"
 
 	cs "github.com/SmartBFT-Go/randomcommittees"
@@ -21,4 +23,8 @@ func TestNewCommitteeSelection(t *testing.T) {
 	var myCommitteeSelection committee.Selection
 	myCommitteeSelection = cs.NewCommitteeSelection(logger.Sugar())
 	_ = myCommitteeSelection
+
+	s, err := cs.StateFromBytes(nil)
+	assert.NotNil(t, s)
+	assert.NoError(t, err)
 }
