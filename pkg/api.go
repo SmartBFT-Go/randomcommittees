@@ -13,7 +13,7 @@ type Selection interface {
 	GenerateKeyPair(rand io.Reader) (PublicKey, PrivateKey, error)
 	// Initialize initializes the committee selection instance with the given identifier and private key,
 	// as well as with all the other nodes.
-	Initialize(ID uint32, PrivateKey []byte, nodes Nodes) error
+	Initialize(ID int32, PrivateKey PrivateKey, nodes Nodes) error
 	// Process interacts with the committee selection and feeds it with events of other remote instances from Input,
 	// and receives feedback on a committee change or requests of messages to be sent via Feedback.
 	// The operation operates on the given state and the new state is returned.

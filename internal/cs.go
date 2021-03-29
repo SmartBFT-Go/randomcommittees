@@ -42,7 +42,7 @@ type CommitteeSelection struct {
 	state               *State
 }
 
-func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) ([]byte, []byte, error) {
+func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) (committee.PublicKey, committee.PrivateKey, error) {
 	sk := suite.Scalar().Pick(random.New(rand))
 	pk := suite.Point().Mul(sk, h)
 	pkRaw, err := pk.MarshalBinary()
@@ -59,7 +59,7 @@ func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) ([]byte, []byte, e
 	return pkRaw, skRaw, nil
 }
 
-func (cs *CommitteeSelection) Initialize(ID int32, privateKey []byte, nodes committee.Nodes) error {
+func (cs *CommitteeSelection) Initialize(ID int32, privateKey committee.PrivateKey, nodes committee.Nodes) error {
 	sk := suite.Scalar()
 	if err := sk.UnmarshalBinary(privateKey); err != nil {
 		return fmt.Errorf("failed unmarshaling secret key: %v", err)
