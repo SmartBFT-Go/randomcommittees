@@ -123,6 +123,7 @@ func TestSelectCommittee(t *testing.T) {
 }
 
 func TestCommitteeSelection(t *testing.T) {
+	t.FailNow()
 	network := createNetwork(t, 11)
 
 	var emptyStates []committee.State
