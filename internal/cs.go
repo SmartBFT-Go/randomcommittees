@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"reflect"
 	"sort"
@@ -31,11 +32,11 @@ type CommitteeSelection struct {
 	Logger          committee.Logger
 	// Configuration
 	id        int32
-	ourIndex  int
 	sk        kyber.Scalar
 	pk        kyber.Point
 	pubKeys   []kyber.Point
 	ids2Index map[int32]int
+	nodes     committee.Nodes
 	// State
 	commitment          *Commitment
 	commitmentInRawForm *committee.Commitment
@@ -60,32 +61,38 @@ func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) (committee.PublicK
 }
 
 func (cs *CommitteeSelection) Initialize(ID int32, privateKey committee.PrivateKey, nodes committee.Nodes) error {
-	sk := suite.Scalar()
-	if err := sk.UnmarshalBinary(privateKey); err != nil {
-		return fmt.Errorf("failed unmarshaling secret key: %v", err)
+	if reflect.DeepEqual(cs.nodes, nodes) {
+		cs.Logger.Debugf("Skipping initialization because nodes haven't changed")
+		return nil
 	}
 
-	cs.sk = sk
-	cs.pk = suite.Point().Mul(cs.sk, h)
-	cs.id = ID
+	var sk kyber.Scalar
+
+	if len(privateKey) == 0 {
+		cs.Logger.Debugf("Initializing a non committee member instance")
+	} else {
+		sk = suite.Scalar()
+		if err := sk.UnmarshalBinary(privateKey); err != nil {
+			return fmt.Errorf("failed unmarshaling secret key: %v", err)
+		}
+	}
+
+	cs.resetState()
+
+	cs.nodes = nodes
+
+	if len(privateKey) > 0 {
+		cs.sk = sk
+		cs.pk = suite.Point().Mul(cs.sk, h)
+		cs.id = ID
+	}
 
 	cs.Logger.Infof("ID: %d, nodes: %s", ID, nodes)
 
-	pkRaw, err := cs.pk.MarshalBinary()
-	if err != nil {
-		return fmt.Errorf("failed marshaling our public key: %v", err)
-	}
-
-	cs.ids2Index = make(map[int32]int)
+	var nodeConfig []string
 	for i, node := range nodes {
 		cs.ids2Index[node.ID] = i
-		cs.Logger.Infof("%d --> %d", i, node.ID)
-	}
-
-	// Locate our index within the nodes according to the ID and public keys
-	cs.ourIndex, err = IsNodeInConfig(cs.id, pkRaw, nodes)
-	if err != nil {
-		return err
+		nodeConfig = append(nodeConfig, fmt.Sprintf("%d --> %d", i, node.ID))
 	}
 
 	// Initialize public keys in EC point form
@@ -98,6 +105,26 @@ func (cs *CommitteeSelection) Initialize(ID int32, privateKey committee.PrivateK
 	}
 
 	return nil
+}
+
+func (cs *CommitteeSelection) resetState() {
+	cs.sk = nil
+	cs.pk = nil
+	cs.id = math.MaxInt32
+	cs.ids2Index = make(map[int32]int)
+	cs.pubKeys = nil
+}
+
+func (cs *CommitteeSelection) ourIndex() (int, bool) {
+	// Locate our index within the nodes according to the ID and public keys
+	for i, pk := range cs.pubKeys {
+		if cs.pk.Equal(pk) {
+			cs.Logger.Debugf("Returning our index (%d) among %v", i, cs.nodes.IDs())
+			return i, true
+		}
+	}
+
+	return 0, false
 }
 
 // IsNodeInConfig returns whether the given node is in the config.
@@ -224,7 +251,7 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 		}
 
 		feedback.NextCommittee = cs.SelectCommittee(input.NextConfig, []byte(digest(combinedSecret)))
-		cs.Logger.Infof("Next committee will be %s", feedback.NextCommittee)
+		cs.Logger.Infof("Next committee out of %v will be %v", input.NextConfig.Nodes.IDs(), feedback.NextCommittee)
 	}
 	return feedback, state, nil
 }
@@ -411,9 +438,15 @@ func reconstructSecrets(reconShares []committee.ReconShare, ids2Index map[int32]
 }
 
 func (cs *CommitteeSelection) createReconShares() ([]committee.ReconShare, error) {
+	ourIndex, weAreInCommittee := cs.ourIndex()
+	if !weAreInCommittee {
+		cs.Logger.Infof("We are not in the committee, should not send reconstruction shares")
+		return nil, nil
+	}
+	cs.Logger.Infof("Total public keys: %v", len(cs.pubKeys))
 	var res []committee.ReconShare
 	for _, cmt := range cs.state.commitments {
-		ourShare := cmt.EncShares[cs.ourIndex]
+		ourShare := cmt.EncShares[ourIndex]
 		d, proof, err := DecryptShare(cs.pk, cs.sk, ourShare)
 		if err != nil {
 			return nil, fmt.Errorf("failed decrypting our share: %v", err)
@@ -752,7 +785,7 @@ func (cms commitments) asStrings() []string {
 
 type Commitment struct {
 	From        int32
-	EncShares   []kyber.Point // n encrypted shares and corresponding ZKPs
+	EncShares   []kyber.Point // n encrypted shares
 	Commitments []kyber.Point // f+1 commitments
 	Proofs      SerializedProofs
 }

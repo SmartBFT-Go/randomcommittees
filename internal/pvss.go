@@ -40,7 +40,7 @@ func (pvss *PVSS) Commit(threshold int, pubKeys []kyber.Point) error {
 	secret := suite.Scalar().Pick(suite.RandomStream())
 
 	// Secret share the secret as a polynomial
-	// {α_0, α_1, ..., α_f}    p(x) = Σ α_i * x^i
+	// {α₀, α₁, ..., α_f}    p(x) = Σ α_i * x^i
 	polynomialCoefficients := share.NewPriPoly(suite, threshold, secret, suite.RandomStream())
 
 	// Commit to the polynomial coefficients
@@ -201,7 +201,7 @@ func (dleqs DLEQBatch) Prove(alphas []kyber.Scalar) (SerializedProofs, error) {
 		a2 kyber.Point
 	}
 	for _, dleq := range dleqs {
-		// Commit to scalar w: ( a1=g1^w, a2=g2^w )
+		// Commit to scalar w: ( a1=g1ʷ, a2=g2ʷ )
 		a1, a2, w := dleq.commit()
 
 		// Add a1, a2 to accumulated points
@@ -308,8 +308,7 @@ func (dleqs DLEQBatch) Verify(proofs []SerializedProof) error {
 
 // DLEQ is a NIZK that proves/verifies there exists
 // some scalar α such that:
-// (1) g1^α = h1
-// (2) g2^α = h2
+// ∃ α | g₁^{α} = h₁ ∧ g₁^{α} = h₂
 type DLEQ struct {
 	G1, H1, G2, H2   kyber.Point
 	computeChallenge func(points ...kyber.Point) kyber.Scalar
