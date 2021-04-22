@@ -24,6 +24,15 @@ func TestCommitteeSize(t *testing.T) {
 		want int
 	}{
 		{
+			name: "8 nodes",
+			want: 7,
+			args: args{
+				failedTotalNodesPercentage: 25,
+				failureChance:              *big.NewRat(1, 1000000),
+				totalNodeCount:             8,
+			},
+		},
+		{
 			name: "4 nodes",
 			want: 4,
 			args: args{
@@ -75,9 +84,8 @@ func TestCommitteeSize(t *testing.T) {
 			if committeeSize != tt.want {
 				t.Errorf("CommitteeSize() = %v, want %v", committeeSize, tt.want)
 			}
-			byzantineRatio := float64(tt.args.failedTotalNodesPercentage) / 100
 			failureChance, _ := tt.args.failureChance.Float64()
-			p := 1 - hyperGeomRangeSum(tt.args.totalNodeCount, int64(committeeSize), byzantineRatio)
+			p := 1 - hyperGeomRangeSum(tt.args.totalNodeCount, int64(committeeSize), tt.args.failedTotalNodesPercentage)
 			assert.LessOrEqual(t, p, failureChance)
 		})
 	}

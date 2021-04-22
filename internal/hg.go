@@ -7,6 +7,7 @@ package cs
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 )
 
@@ -21,19 +22,17 @@ func CommitteeSize(totalNodeCount int64, failedTotalNodesPercentage int64, failu
 
 	failureChanceFloat, _ := failureChance.Float64()
 
-	byzantineRatio := float64(failedTotalNodesPercentage) / 100
-
 	return int(binarySearch(4, totalNodeCount, func(committeeSize int64) cmp {
-		p := 1 - hyperGeomRangeSum(totalNodeCount, committeeSize, byzantineRatio)
+		p := 1 - hyperGeomRangeSum(totalNodeCount, committeeSize, failedTotalNodesPercentage)
 		return failureChanceFloat > p
 	}))
 }
 
-func hyperGeomRangeSum(N, n int64, byzantine float64) float64 {
+func hyperGeomRangeSum(N, n int64, failedTotalNodesPercentage int64) float64 {
 	third := (n - 1) / 3
 	sum := big.NewRat(0, 1)
 	for t := int64(0); t <= third; t++ {
-		hg := hyperGeom(N, n, t, byzantine)
+		hg := hyperGeom(N, n, t, failedTotalNodesPercentage)
 		sum.Add(sum, hg)
 	}
 
@@ -44,8 +43,8 @@ func hyperGeomRangeSum(N, n int64, byzantine float64) float64 {
 	return floatSum
 }
 
-func hyperGeom(total, committeeTotal, committeeByzantine int64, byzantineRatio float64) *big.Rat {
-	byzantineTotal := int64(float64(total) * byzantineRatio)
+func hyperGeom(total, committeeTotal, committeeByzantine int64, failedTotalNodesPercentage int64) *big.Rat {
+	byzantineTotal := int64(math.Floor(float64(total*failedTotalNodesPercentage) / 100))
 	a := choose(byzantineTotal, committeeByzantine)
 	b := choose(total-byzantineTotal, committeeTotal-committeeByzantine)
 	c := choose(total, committeeTotal)
