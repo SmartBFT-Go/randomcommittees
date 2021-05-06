@@ -222,6 +222,7 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 		prevDigest := cs.state.header.BodyDigest
 		cs.state.header.BodyDigest = digest(cs.state.bodyBytes)
 		cs.Logger.Infof("State changed from %s to %s", prevDigest, cs.state.header.BodyDigest)
+		state = cs.state
 	}
 
 	// Did we receive reconstruction shares?
@@ -562,7 +563,7 @@ func (s *State) String() string {
 	m := make(map[string]interface{})
 	m["commitments"] = s.commitments.asStrings()
 	m["header"] = fmt.Sprintf("BodyDigest: %s", s.header.BodyDigest)
-	m["body"] = fmt.Sprintf("commitments: %d, reconshares: %d", len(s.body.Commitments), len(s.body.ReconShares))
+	m["body"] = fmt.Sprintf("commitments: %d", len(s.body.Commitments))
 
 	str, err := json.Marshal(m)
 	if err != nil {
@@ -748,7 +749,6 @@ func (h Header) Bytes() []byte {
 
 type Body struct {
 	Commitments []committee.Commitment
-	ReconShares []committee.ReconShare
 }
 
 func (b Body) Bytes() []byte {
@@ -758,10 +758,6 @@ func (b Body) Bytes() []byte {
 			Data: cmt.Data,
 			From: cmt.From,
 		})
-	}
-
-	for _, reconShare := range b.ReconShares {
-		bodyToSerialize.ReconShares = append(bodyToSerialize.ReconShares, reconShare)
 	}
 
 	bodyBytes, err := asn1.Marshal(bodyToSerialize)
