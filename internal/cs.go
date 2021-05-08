@@ -116,7 +116,7 @@ func (cs *CommitteeSelection) resetState() {
 func (cs *CommitteeSelection) ourIndex() (int, bool) {
 	// Locate our index within the nodes according to the ID and public keys
 	for i, pk := range cs.pubKeys {
-		if cs.pk.Equal(pk) {
+		if cs.pk != nil && cs.pk.Equal(pk) {
 			cs.Logger.Debugf("Returning our index (%d) among %v", i, cs.nodes.IDs())
 			return i, true
 		}
