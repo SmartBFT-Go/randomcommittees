@@ -38,9 +38,7 @@ type CommitteeSelection struct {
 	ids2Index map[int32]int
 	nodes     committee.Nodes
 	// State
-	commitment          *Commitment
-	commitmentInRawForm *committee.Commitment
-	state               *State
+	state *State
 }
 
 func (cs *CommitteeSelection) GenerateKeyPair(rand io.Reader) (committee.PublicKey, committee.PrivateKey, error) {
@@ -174,22 +172,18 @@ func (cs *CommitteeSelection) Process(state committee.State, input committee.Inp
 		cs.state = newState
 	}
 
-	// Search for a commitment among the current state.
-	// If we found a commitment in the current state, then load it to avoid computing it.
-	commitments := cs.state.commitments
-	if err := cs.loadOurCommitment(commitments); err != nil {
-		return committee.Feedback{}, nil, err
-	}
+	// Search for a commitment among the current state or the input.
+	// If we found a commitment in the current state, or input, then no need to commit again.
+	weHaveCommitted := cs.ourCommitmentExists(cs.state.commitments, input)
 
 	// Prepare a fresh commitment if we haven't found one in the current committee, or didn't prepare one earlier.
-	if cs.commitment == nil {
-		if err := cs.prepareCommitment(); err != nil {
+	if !weHaveCommitted && cs.id != math.MaxInt32 {
+		if commit, err := cs.prepareCommitment(); err != nil {
 			return committee.Feedback{}, nil, err
+		} else {
+			feedback.Commitment = commit
 		}
 	}
-
-	// Assign the commitment to be sent
-	feedback.Commitment = cs.commitmentInRawForm
 
 	var changed bool
 
@@ -480,31 +474,28 @@ func (cs *CommitteeSelection) createReconShares() ([]committee.ReconShare, error
 	return res, nil
 }
 
-func (cs *CommitteeSelection) loadOurCommitment(commitments []Commitment) error {
+func (cs *CommitteeSelection) ourCommitmentExists(commitments []Commitment, input committee.Input) bool {
 	for _, cmt := range commitments {
 		if cs.id == cmt.From {
-			cs.commitment = &Commitment{
-				From:        cmt.From,
-				Commitments: cmt.Commitments,
-				EncShares:   cmt.EncShares,
-			}
-			rawCommitment, err := cs.commitment.ToRawForm(cs.id)
-			if err != nil {
-				return fmt.Errorf("failed serializing commitment to its raw form: %v", err)
-			}
-			cs.commitmentInRawForm = &rawCommitment
-			cs.Logger.Infof("Found our commitment among %d commitments", len(commitments))
+			return true
 		}
 	}
 
-	cs.Logger.Infof("Our commitment wasn't found among %d commitments", len(commitments))
-	return nil
+	for _, cmt := range input.Commitments {
+		if cs.id == cmt.From {
+			return true
+		}
+	}
+
+	return false
 }
 
-func (cs *CommitteeSelection) prepareCommitment() error {
+func (cs *CommitteeSelection) prepareCommitment() (*committee.Commitment, error) {
 	pvss := PVSS{}
-	if err := pvss.Commit(cs.threshold(), cs.pubKeys); err != nil {
-		return err
+	t := cs.threshold()
+	cs.Logger.Debugf("Creating a commitment for threshold of %d and %d public keys", t, len(cs.pubKeys))
+	if err := pvss.Commit(t, cs.pubKeys); err != nil {
+		return nil, err
 	}
 
 	commitment := Commitment{
@@ -514,18 +505,20 @@ func (cs *CommitteeSelection) prepareCommitment() error {
 		Proofs:      pvss.Proofs,
 	}
 
+	cs.Logger.Debugf("Created %d encrypted evaluations, %d commitments and %d proofs",
+		len(pvss.EncryptedEvaluations),
+		len(pvss.Commitments),
+		len(pvss.Proofs.Proofs))
+
 	rawCommitment, err := commitment.ToRawForm(cs.id)
 	if err != nil {
-		return fmt.Errorf("failed computing commitment: %v", err)
+		return nil, fmt.Errorf("failed computing commitment: %v", err)
 	}
 
-	cs.commitment = &commitment
-	cs.commitmentInRawForm = &rawCommitment
+	cs.Logger.Infof("Prepared a raw commitment from us (%d) of %d bytes and proofs of %d bytes",
+		rawCommitment.From, len(rawCommitment.Data), len(rawCommitment.Proof))
 
-	cs.Logger.Infof("Prepared a commitment with %d commitments and %d encrypted shares",
-		len(commitment.Commitments), len(commitment.EncShares))
-
-	return nil
+	return &rawCommitment, nil
 }
 
 func (cs *CommitteeSelection) threshold() int {
