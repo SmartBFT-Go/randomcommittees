@@ -170,7 +170,7 @@ func TestCommitteeSelection(t *testing.T) {
 					}
 
 					// Everyone has commitment feedback but the 'i' node
-					if j == i {
+					if j == i || j < i {
 						assert.Nil(t, e.f.Commitment)
 					} else {
 						assert.NotNil(t, e.f.Commitment)
